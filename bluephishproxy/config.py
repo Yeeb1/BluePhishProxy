@@ -44,6 +44,19 @@ def _env_json_list(name: str) -> list[Any]:
         return [raw]
 
 
+def _env_json_dict(name: str) -> dict[str, Any]:
+    raw = os.environ.get(name)
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+    return {}
+
+
 @dataclass(slots=True)
 class Config:
     """Immutable-ish runtime configuration."""
@@ -112,6 +125,45 @@ class Config:
     operator_token: str = field(
         default_factory=lambda: os.environ.get("BPP_OPERATOR_TOKEN") or ""
     )
+    rate_limit: int = field(
+        default_factory=lambda: _env_int("BPP_RATE_LIMIT", 60)
+    )
+
+    # --- cloudflare -------------------------------------------------------
+    behind_cloudflare: bool = field(
+        default_factory=lambda: _env_bool("BPP_BEHIND_CLOUDFLARE", False)
+    )
+
+    # --- TLS --------------------------------------------------------------
+    tls_cert: str = field(
+        default_factory=lambda: os.environ.get("BPP_TLS_CERT") or ""
+    )
+    tls_key: str = field(
+        default_factory=lambda: os.environ.get("BPP_TLS_KEY") or ""
+    )
+
+    # --- database ---------------------------------------------------------
+    database_path: str = field(
+        default_factory=lambda: os.environ.get("BPP_DATABASE", "data/bluephishproxy.db")
+    )
+
+    # --- redirect chains --------------------------------------------------
+    redirect_chains: dict[str, Any] = field(
+        default_factory=lambda: _env_json_dict("BPP_REDIRECT_CHAINS")
+    )
+
+    # --- templates --------------------------------------------------------
+    templates_dir: str = field(
+        default_factory=lambda: os.environ.get("BPP_TEMPLATES_DIR") or ""
+    )
+
+    # --- single-campaign auto-setup ---------------------------------------
+    campaign_name: str = field(
+        default_factory=lambda: os.environ.get("BPP_CAMPAIGN_NAME") or ""
+    )
+    campaign_template: str = field(
+        default_factory=lambda: os.environ.get("BPP_CAMPAIGN_TEMPLATE") or ""
+    )
 
     def __post_init__(self) -> None:
         self.data_dir = Path(self.data_dir)
@@ -124,3 +176,7 @@ class Config:
 
     def resolved_secret_key(self) -> str:
         return self.secret_key or secrets.token_hex(32)
+
+    @property
+    def tls_enabled(self) -> bool:
+        return bool(self.tls_cert and self.tls_key)

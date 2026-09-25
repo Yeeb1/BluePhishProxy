@@ -350,3 +350,111 @@ def signals_from_timing(elapsed_ms: float | None) -> list[Signal]:
         signals.append(Signal("timing", "instant-arrival", 20,
                               f"Arrived at final page in {elapsed_ms:.0f}ms"))
     return signals
+
+
+# ---------------------------------------------------------------------------
+# Cloudflare header analysis
+# ---------------------------------------------------------------------------
+
+def signals_from_cloudflare(headers: dict[str, str]) -> list[Signal]:
+    signals: list[Signal] = []
+
+    cf_worker = headers.get("Cf-Worker")
+    if cf_worker:
+        signals.append(Signal("cf", "cloudflare-worker", 60,
+                              f"Request via CF Worker: {cf_worker}"))
+
+    cf_bot_score = headers.get("Cf-Bot-Score")
+    if cf_bot_score:
+        try:
+            score = int(cf_bot_score)
+            if score < 30:
+                signals.append(Signal("cf", "cf-bot-score-low", 70,
+                                      f"Cloudflare Bot Score={score} (likely automated)"))
+            elif score < 60:
+                signals.append(Signal("cf", "cf-bot-score-medium", 35,
+                                      f"Cloudflare Bot Score={score} (possibly automated)"))
+        except ValueError:
+            pass
+
+    cf_verified_bot = headers.get("Cf-Verified-Bot")
+    if cf_verified_bot and cf_verified_bot.lower() == "true":
+        signals.append(Signal("cf", "cf-verified-bot", 80,
+                              "Cloudflare verified bot"))
+
+    cf_threat_score = headers.get("Cf-Threat-Score")
+    if cf_threat_score:
+        try:
+            threat = int(cf_threat_score)
+            if threat > 10:
+                signals.append(Signal("cf", "cf-threat-score", 40,
+                                      f"Cloudflare Threat Score={threat}"))
+        except ValueError:
+            pass
+
+    cf_warp = headers.get("Cf-Warp-Tag-Id")
+    if cf_warp:
+        signals.append(Signal("cf", "cf-warp", 15,
+                              "Request via Cloudflare WARP"))
+
+    return signals
+
+
+# ---------------------------------------------------------------------------
+# Evasion counters / advanced detection
+# ---------------------------------------------------------------------------
+
+KNOWN_SCANNER_JA3: frozenset[str] = frozenset({
+    "e7d705a3286e19ea42f587b344ee6865",  # python-requests
+    "b32309a26951912be7dba376398abc3b",  # Go default
+    "3b5074b1b5d032e5620f69f9f700ff0e",  # curl
+    "cd08e31494f9531f560d64c695473da9",  # wget
+    "473cd7cb9faa642487833f3c5e0dd1c2",  # Java default
+    "a0e9f5d64349fb13191bc781f81f42e1",  # headless Chrome
+    "19e29534fd49dd27d09234e639c4057e",  # PhantomJS
+    "5d65ea3fb1d6d1dc7ed37b6a250d2a18",  # Scrapy
+    "535aca3d99fc247509735f1e3ca1c171",  # Node.js default
+    "6fa3244afc6bb6f9fad207b6b52af26b",  # Ruby
+})
+
+
+def signals_from_tls(headers: dict[str, str]) -> list[Signal]:
+    signals: list[Signal] = []
+
+    ja3 = headers.get("X-Ja3-Fingerprint") or headers.get("X-Ja3-Hash")
+    if ja3:
+        ja3_lower = ja3.lower().strip()
+        if ja3_lower in KNOWN_SCANNER_JA3:
+            signals.append(Signal("tls", "known-scanner-ja3", 65,
+                                  f"JA3 matches known scanner: {ja3_lower[:16]}..."))
+
+    ja4 = headers.get("X-Ja4-Fingerprint") or headers.get("X-Ja4-Hash")
+    if ja4:
+        if ja4.startswith("t0") or ja4.startswith("q0"):
+            signals.append(Signal("tls", "ja4-no-alpn", 40,
+                                  f"JA4 indicates no ALPN (unusual for browser): {ja4[:20]}"))
+
+    return signals
+
+
+def signals_from_http_version(
+    http_version: str | None,
+    user_agent: str,
+) -> list[Signal]:
+    signals: list[Signal] = []
+    if not http_version:
+        return signals
+
+    is_modern_browser = any(
+        tok in user_agent.lower()
+        for tok in ("chrome/", "firefox/", "safari/", "edg/")
+    )
+
+    if is_modern_browser and http_version == "HTTP/1.0":
+        signals.append(Signal("http", "http1.0-modern-ua", 50,
+                              "Claims modern browser but uses HTTP/1.0"))
+    elif is_modern_browser and http_version == "HTTP/1.1":
+        signals.append(Signal("http", "http1.1-modern-ua", 20,
+                              "Claims modern browser but uses HTTP/1.1 (not h2)"))
+
+    return signals

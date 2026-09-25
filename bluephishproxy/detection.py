@@ -20,10 +20,13 @@ from .fingerprint import (
     Signal,
     enrich_ip,
     parse_user_agent,
+    signals_from_cloudflare,
     signals_from_headers,
+    signals_from_http_version,
     signals_from_ip,
     signals_from_js,
     signals_from_timing,
+    signals_from_tls,
     signals_from_ua,
 )
 from .vendors import Vendor, match_org, match_scanner_ua
@@ -62,6 +65,7 @@ def evaluate(
     js_metrics: dict[str, Any] | None,
     elapsed_ms: float | None,
     cfg: Config,
+    http_version: str | None = None,
 ) -> Verdict:
     all_signals: list[Signal] = []
 
@@ -75,6 +79,12 @@ def evaluate(
     all_signals.extend(signals_from_js(js_metrics))
 
     all_signals.extend(signals_from_timing(elapsed_ms))
+
+    if cfg.behind_cloudflare:
+        all_signals.extend(signals_from_cloudflare(headers))
+
+    all_signals.extend(signals_from_tls(headers))
+    all_signals.extend(signals_from_http_version(http_version, user_agent))
 
     total = sum(s.weight for s in all_signals)
 
@@ -111,6 +121,7 @@ def build_visit_record(
     js_metrics: dict[str, Any] | None,
     elapsed_ms: float | None,
     cfg: Config,
+    http_version: str | None = None,
 ) -> dict[str, Any]:
     import datetime
 
@@ -123,6 +134,7 @@ def build_visit_record(
         js_metrics=js_metrics,
         elapsed_ms=elapsed_ms,
         cfg=cfg,
+        http_version=http_version,
     )
 
     record: dict[str, Any] = {
@@ -155,5 +167,27 @@ def build_visit_record(
 
     if js_metrics:
         record["advanced_metrics"] = js_metrics
+
+    ja3 = headers.get("X-Ja3-Fingerprint") or headers.get("X-Ja3-Hash")
+    if ja3:
+        record["ja3_hash"] = ja3.strip()
+
+    if http_version:
+        record["http_version"] = http_version
+
+    if cfg.behind_cloudflare:
+        cf_country = headers.get("Cf-Ipcountry")
+        if cf_country:
+            record["cf_country"] = cf_country
+            record["country"] = cf_country
+        cf_ray = headers.get("Cf-Ray")
+        if cf_ray:
+            record["cf_ray"] = cf_ray
+        cf_bot = headers.get("Cf-Bot-Score")
+        if cf_bot:
+            try:
+                record["cf_bot_score"] = int(cf_bot)
+            except ValueError:
+                pass
 
     return record

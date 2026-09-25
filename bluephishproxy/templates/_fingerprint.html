@@ -1,0 +1,176 @@
+<script>
+(function() {
+  "use strict";
+  var t0 = Date.now();
+  var m = {
+    windowSize: [window.innerWidth, window.innerHeight],
+    windowOuter: [window.outerWidth, window.outerHeight],
+    screenSize: [screen.width, screen.height],
+    colorDepth: screen.colorDepth,
+    pixelRatio: window.devicePixelRatio || 1,
+    webdriver: (navigator.webdriver === true),
+    mouseMoves: 0,
+    clicks: 0,
+    touchEvents: 0,
+    hasTouchEvents: false,
+    keyEvents: 0,
+    scrollEvents: 0,
+    focusEvents: 0,
+    pluginCount: navigator.plugins ? navigator.plugins.length : -1,
+    languageCount: navigator.languages ? navigator.languages.length : 0,
+    languages: navigator.languages ? Array.from(navigator.languages) : [],
+    cookiesEnabled: navigator.cookieEnabled,
+    doNotTrack: navigator.doNotTrack || "unset",
+    hardwareConcurrency: navigator.hardwareConcurrency || 0,
+    maxTouchPoints: navigator.maxTouchPoints || 0,
+    platform: navigator.platform || "",
+    vendor: navigator.vendor || "",
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "",
+    timezoneOffset: new Date().getTimezoneOffset(),
+    canvasHash: null,
+    canvasBlocked: false,
+    webglRenderer: null,
+    webglVendor: null,
+    audioFingerprint: null,
+    audioBlocked: false,
+    automationAPIs: false,
+    notificationPermission: typeof Notification !== "undefined" ? Notification.permission : "unsupported",
+    connectionType: null,
+    rafDelta: null,
+    performanceTiming: null,
+    touchSupport: ("ontouchstart" in window) || (navigator.maxTouchPoints > 0),
+    pdfViewerEnabled: navigator.pdfViewerEnabled || false,
+    deviceMemory: navigator.deviceMemory || null,
+    reducedMotion: window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+    darkMode: window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches,
+    elapsed: 0,
+    interactionTimeline: [],
+    mousePattern: [],
+    clickCoords: []
+  };
+
+  var iStart = Date.now();
+  document.addEventListener("mousemove", function(e) {
+    m.mouseMoves++;
+    if (m.mousePattern.length < 50) {
+      m.mousePattern.push([e.clientX, e.clientY, Date.now() - iStart]);
+    }
+  });
+  document.addEventListener("click", function(e) {
+    m.clicks++;
+    if (m.clickCoords.length < 20) {
+      m.clickCoords.push([e.clientX, e.clientY, Date.now() - iStart]);
+    }
+  });
+  document.addEventListener("touchstart", function() {
+    m.touchEvents++;
+    m.hasTouchEvents = true;
+  });
+  document.addEventListener("keydown", function() { m.keyEvents++ });
+  document.addEventListener("scroll", function() { m.scrollEvents++ });
+  window.addEventListener("focus", function() { m.focusEvents++ });
+  window.addEventListener("blur", function() {
+    m.interactionTimeline.push(["blur", Date.now() - iStart]);
+  });
+
+  try {
+    var c = document.createElement("canvas");
+    c.width = 200; c.height = 50;
+    var ctx = c.getContext("2d");
+    ctx.textBaseline = "top";
+    ctx.font = "14px Arial";
+    ctx.fillStyle = "#f60";
+    ctx.fillRect(50, 0, 100, 50);
+    ctx.fillStyle = "#069";
+    ctx.fillText("BPP:cv:fp", 2, 15);
+    ctx.fillStyle = "rgba(102,204,0,0.7)";
+    ctx.fillText("BPP:cv:fp", 4, 17);
+    var d = c.toDataURL();
+    if (d && d.length > 100) {
+      var h = 0;
+      for (var i = 0; i < d.length; i++) h = ((h << 5) - h + d.charCodeAt(i)) | 0;
+      m.canvasHash = h.toString(16);
+    } else m.canvasBlocked = true;
+  } catch(e) { m.canvasBlocked = true }
+
+  try {
+    var gl = document.createElement("canvas").getContext("webgl")
+         || document.createElement("canvas").getContext("experimental-webgl");
+    if (gl) {
+      var dbg = gl.getExtension("WEBGL_debug_renderer_info");
+      if (dbg) {
+        m.webglRenderer = gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL);
+        m.webglVendor = gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL);
+      }
+    }
+  } catch(e) {}
+
+  try {
+    var actx = new (window.AudioContext || window.webkitAudioContext)();
+    var osc = actx.createOscillator();
+    var an = actx.createAnalyser();
+    var gain = actx.createGain();
+    var proc = actx.createScriptProcessor(4096, 1, 1);
+    gain.gain.value = 0;
+    osc.type = "triangle";
+    osc.connect(an); an.connect(proc); proc.connect(gain); gain.connect(actx.destination);
+    osc.start(0);
+    proc.onaudioprocess = function() {
+      var buf = new Float32Array(an.frequencyBinCount);
+      an.getFloatFrequencyData(buf);
+      var sum = 0;
+      for (var j = 0; j < buf.length; j++) sum += Math.abs(buf[j]);
+      m.audioFingerprint = sum.toFixed(2);
+      proc.disconnect(); osc.stop(); actx.close();
+    };
+    setTimeout(function() { try { proc.disconnect(); osc.stop(); actx.close() } catch(e){} }, 1500);
+  } catch(e) { m.audioBlocked = true }
+
+  try {
+    if (window.__nightmare || window._phantom || window.callPhantom ||
+        window.__selenium_unwrapped || window.__webdriver_evaluate ||
+        window.__driver_evaluate || window.__webdriver_script_fn ||
+        window.__webdriver_script_func || window.__lastWatirAlert ||
+        window.__lastWatirConfirm || window.__lastWatirPrompt ||
+        document.__selenium_unwrapped || document.__webdriver_evaluate ||
+        window.domAutomation || window.domAutomationController ||
+        navigator.webdriver) {
+      m.automationAPIs = true;
+    }
+  } catch(e) {}
+
+  try {
+    if (navigator.connection)
+      m.connectionType = navigator.connection.effectiveType || navigator.connection.type || null;
+  } catch(e) {}
+
+  try {
+    var rafStart = performance.now();
+    requestAnimationFrame(function() { m.rafDelta = Math.round(performance.now() - rafStart) });
+  } catch(e) {}
+
+  try {
+    if (performance.timing) {
+      var pt = performance.timing;
+      m.performanceTiming = {
+        domContentLoaded: pt.domContentLoadedEventEnd - pt.navigationStart,
+        loadComplete: pt.loadEventEnd - pt.navigationStart,
+        dns: pt.domainLookupEnd - pt.domainLookupStart,
+        connect: pt.connectEnd - pt.connectStart,
+        ttfb: pt.responseStart - pt.navigationStart
+      };
+    }
+  } catch(e) {}
+
+  window.__bpp_metrics = m;
+  window.__bpp_send = function(cb) {
+    m.elapsed = Date.now() - t0;
+    var xhr = new XMLHttpRequest();
+    xhr.open("POST", "/_bpp/collect", true);
+    xhr.setRequestHeader("Content-Type", "application/json");
+    xhr.onload = function() { if (cb) cb(true) };
+    xhr.onerror = function() { if (cb) cb(false) };
+    xhr.send(JSON.stringify(m));
+  };
+})();
+</script>

