@@ -1,31 +1,22 @@
-"""Engagement report generation.
+"""Engagement report generation — SQLite-backed.
 
-Reads stored visit JSON files and daily analytics to produce a summary report
-in Markdown that operators can hand to customers. Campaign-aware: breaks down
-findings by campaign when campaign data is present.
+Reads visit data from the SQLite database to produce a summary report
+in Markdown that operators can hand to customers.
 """
 
 from __future__ import annotations
 
-import json
 import datetime
-from collections import Counter, defaultdict
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
 from .config import Config
+from .database import query_visits, get_visit_stats, get_vendor_stats
 
 
-def _load_visits(cfg: Config) -> list[dict[str, Any]]:
-    visits: list[dict[str, Any]] = []
-    if not cfg.data_dir.exists():
-        return visits
-    for f in sorted(cfg.data_dir.glob("*.json")):
-        try:
-            visits.append(json.loads(f.read_text()))
-        except (json.JSONDecodeError, OSError):
-            continue
-    return visits
+def _load_visits_db(cfg: Config, limit: int = 5000) -> list[dict[str, Any]]:
+    return query_visits(cfg, limit=limit)
 
 
 def _section_stats(visits: list[dict[str, Any]], heading: str) -> list[str]:
@@ -33,7 +24,7 @@ def _section_stats(visits: list[dict[str, Any]], heading: str) -> list[str]:
         return []
 
     total = len(visits)
-    bots = [v for v in visits if v.get("is_bot")]
+    bots = [v for v in visits if v.get("is_bot") or v.get("classification") == "bot"]
     suspicious = [v for v in visits if v.get("classification") == "suspicious"]
     clean = [v for v in visits if v.get("classification") == "clean"]
 
@@ -50,8 +41,9 @@ def _section_stats(visits: list[dict[str, Any]], heading: str) -> list[str]:
         org_counter[v.get("org", "Unknown")] += 1
         country_counter[v.get("country", "Unknown")] += 1
         ip_set.add(v.get("ip_address", "?"))
-        for sig in v.get("detection_signals", []):
-            signal_counter[sig.get("tag", "?")] += 1
+        top_sig = v.get("top_signal", "")
+        if top_sig:
+            signal_counter[top_sig] += 1
 
     lines = [
         f"## {heading}",
@@ -111,7 +103,7 @@ def _section_stats(visits: list[dict[str, Any]], heading: str) -> list[str]:
             vendor = v.get("vendor_name", "N/A")
             score = v.get("detection_score", 0)
             ts = v.get("timestamp", "?")
-            ua = v.get("user_agent", "?")[:80]
+            ua = (v.get("user_agent") or "?")[:80]
             lines.append(f"- **{ip}** ({org}) score={score} vendor={vendor}")
             lines.append(f"  - {ts} — `{ua}`")
         if len(bots) > 50:
@@ -122,7 +114,7 @@ def _section_stats(visits: list[dict[str, Any]], heading: str) -> list[str]:
 
 
 def generate_markdown(cfg: Config) -> str:
-    visits = _load_visits(cfg)
+    visits = _load_visits_db(cfg)
     now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     if not visits:
@@ -136,15 +128,15 @@ def generate_markdown(cfg: Config) -> str:
 
     lines.extend(_section_stats(visits, "Overall Summary"))
 
-    by_campaign: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    by_campaign: dict[str, list[dict[str, Any]]] = {}
     for v in visits:
-        cid = v.get("campaign_id", "default")
-        by_campaign[cid].append(v)
+        cid = v.get("campaign_id") or "default"
+        by_campaign.setdefault(cid, []).append(v)
 
     if len(by_campaign) > 1 or "default" not in by_campaign:
         for cid, cvisits in sorted(by_campaign.items()):
-            cname = cvisits[0].get("campaign_name", cid)
-            template = cvisits[0].get("template", "?")
+            cname = cvisits[0].get("campaign_name") or cid
+            template = cvisits[0].get("template") or "?"
             heading = f"Campaign: {cname} ({cid}) — template: {template}"
             lines.extend(_section_stats(cvisits, heading))
 

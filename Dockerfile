@@ -8,11 +8,17 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY bluephishproxy/ bluephishproxy/
 COPY BluePhishProxy.py .
 
-RUN mkdir -p data analytics
+RUN mkdir -p data analytics certs
+
+VOLUME ["/app/data", "/app/certs"]
 
 EXPOSE 8443
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8443/health')" || exit 1
 
 CMD ["gunicorn", "bluephishproxy.app:create_app()", \
      "--bind", "0.0.0.0:8443", \
      "--workers", "4", \
+     "--timeout", "120", \
      "--access-logfile", "-"]
