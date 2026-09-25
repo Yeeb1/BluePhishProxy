@@ -1,0 +1,26 @@
+services:
+  bluephishproxy:
+    build: .
+    command: ["sh", "-c", "python BluePhishProxy.py initdb && gunicorn -w 4 -b 0.0.0.0:5000 'BluePhishProxy:app'"]
+    ports:
+      - "127.0.0.1:5000:5000"
+    env_file:
+      - .env
+    environment:
+      - BPP_BEHIND_CLOUDFLARE=true
+    volumes:
+      - bpp-data:/app/data
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/api/v2/metrics/usr"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+
+volumes:
+  bpp-data:
