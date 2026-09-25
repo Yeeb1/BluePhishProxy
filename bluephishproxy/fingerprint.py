@@ -447,7 +447,7 @@ def compute_device_id(
     user_agent: str,
     headers: dict[str, str],
 ) -> str | None:
-    if not js_metrics:
+    if js_metrics is None:
         return None
 
     components = [
