@@ -18,6 +18,8 @@ from typing import Any
 from .config import Config
 from .fingerprint import (
     Signal,
+    compute_device_id,
+    detect_prefetch,
     enrich_ip,
     parse_user_agent,
     signals_from_cloudflare,
@@ -164,6 +166,17 @@ def build_visit_record(
     if verdict.vendor:
         record["vendor_name"] = verdict.vendor.name
         record["vendor_category"] = verdict.vendor.category
+
+    device_id = compute_device_id(js_metrics, user_agent, headers)
+    if device_id:
+        record["device_id"] = device_id
+
+    is_prefetch, prefetch_reason = detect_prefetch(
+        user_agent, headers, js_metrics, elapsed_ms
+    )
+    if is_prefetch:
+        record["is_prefetch"] = True
+        record["prefetch_reason"] = prefetch_reason
 
     if js_metrics:
         record["advanced_metrics"] = js_metrics

@@ -6,6 +6,7 @@ objects. The detection module aggregates all signals into a scored verdict.
 
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import re
 from dataclasses import dataclass
@@ -435,6 +436,130 @@ def signals_from_tls(headers: dict[str, str]) -> list[Signal]:
                                   f"JA4 indicates no ALPN (unusual for browser): {ja4[:20]}"))
 
     return signals
+
+
+# ---------------------------------------------------------------------------
+# Device fingerprint hashing
+# ---------------------------------------------------------------------------
+
+def compute_device_id(
+    js_metrics: dict[str, Any] | None,
+    user_agent: str,
+    headers: dict[str, str],
+) -> str | None:
+    if not js_metrics:
+        return None
+
+    components = [
+        str(js_metrics.get("canvasHash", "")),
+        str(js_metrics.get("webglRenderer", "")),
+        str(js_metrics.get("webglVendor", "")),
+        str(js_metrics.get("audioFingerprint", "")),
+        str(js_metrics.get("platform", "")),
+        str(js_metrics.get("timezone", "")),
+        str(js_metrics.get("timezoneOffset", "")),
+        str(js_metrics.get("hardwareConcurrency", "")),
+        str(js_metrics.get("deviceMemory", "")),
+        str(js_metrics.get("colorDepth", "")),
+        str(js_metrics.get("screenSize", "")),
+        str(js_metrics.get("maxTouchPoints", "")),
+        str(js_metrics.get("languages", "")),
+        str(js_metrics.get("vendor", "")),
+        str(js_metrics.get("pdfViewerEnabled", "")),
+        headers.get("Sec-CH-UA-Platform", ""),
+        headers.get("Sec-CH-UA-Arch", ""),
+    ]
+    raw = "|".join(components)
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+# ---------------------------------------------------------------------------
+# Email client pre-fetch detection
+# ---------------------------------------------------------------------------
+
+_PREFETCH_UA_TOKENS = [
+    "microsoft office",
+    "ms office",
+    "outlookbot",
+    "outlook-ios",
+    "microsoft outlook",
+    "safelinks",
+    "atp",
+    "proofpoint",
+    "mimecast",
+    "barracuda",
+    "fireeye",
+    "messagelabs",
+    "ironport",
+    "symantec",
+    "googlebot",
+    "google-safety",
+    "google favicon",
+    "microsoft-cryptoapi",
+    "url reputation",
+    "link preview",
+    "slackbot",
+    "twitterbot",
+    "telegrambot",
+    "whatsapp",
+    "facebookexternalhit",
+    "linkedinbot",
+]
+
+_PREFETCH_HEADERS = [
+    "X-MS-Exchange-Organization-AuthSource",
+    "X-MS-Exchange-Organization-SCL",
+    "X-Forwarded-By-Microsoft",
+    "X-MS-Exchange-Organization-AVStamp",
+    "X-SafeLinks-Debug",
+    "X-Proofpoint-Spam-Details",
+    "X-Barracuda-Spam-Score",
+    "X-Mimecast-Spam-Score",
+]
+
+
+def detect_prefetch(
+    user_agent: str,
+    headers: dict[str, str],
+    js_metrics: dict[str, Any] | None,
+    elapsed_ms: float | None,
+) -> tuple[bool, str]:
+    ua_lower = user_agent.lower()
+
+    for token in _PREFETCH_UA_TOKENS:
+        if token in ua_lower:
+            return True, f"prefetch-ua:{token}"
+
+    for hdr in _PREFETCH_HEADERS:
+        if headers.get(hdr):
+            return True, f"prefetch-header:{hdr}"
+
+    purpose = headers.get("Purpose", "").lower()
+    sec_purpose = headers.get("Sec-Purpose", "").lower()
+    if purpose == "prefetch" or sec_purpose == "prefetch":
+        return True, "prefetch-header:Purpose"
+
+    sec_fetch_dest = headers.get("Sec-Fetch-Dest", "").lower()
+    sec_fetch_site = headers.get("Sec-Fetch-Site", "").lower()
+    sec_fetch_user = headers.get("Sec-Fetch-User", "")
+
+    if sec_fetch_site == "cross-site" and sec_fetch_user != "?1" and not js_metrics:
+        if elapsed_ms is not None and elapsed_ms < 200:
+            return True, "prefetch-behavior:fast-cross-site-no-js"
+
+    if not js_metrics:
+        if elapsed_ms is not None and elapsed_ms < 100:
+            return True, "prefetch-behavior:instant-no-js"
+
+        mouse = 0
+        if js_metrics:
+            mouse = js_metrics.get("mouseMoves", 0)
+        if elapsed_ms is not None and elapsed_ms < 500 and mouse == 0:
+            accept = headers.get("Accept", "")
+            if "text/html" not in accept:
+                return True, "prefetch-behavior:no-html-accept-no-js"
+
+    return False, ""
 
 
 def signals_from_http_version(

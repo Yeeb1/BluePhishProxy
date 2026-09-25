@@ -58,6 +58,11 @@ CREATE TABLE IF NOT EXISTS visits (
     cf_bot_score INTEGER,
     cf_country TEXT,
     cf_ray TEXT,
+    recipient_id INTEGER,
+    tracking_token TEXT,
+    device_id TEXT,
+    is_prefetch INTEGER NOT NULL DEFAULT 0,
+    prefetch_reason TEXT,
     timestamp TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -67,6 +72,9 @@ CREATE INDEX IF NOT EXISTS idx_visits_classification ON visits(classification);
 CREATE INDEX IF NOT EXISTS idx_visits_timestamp ON visits(timestamp);
 CREATE INDEX IF NOT EXISTS idx_visits_ip ON visits(ip_address);
 CREATE INDEX IF NOT EXISTS idx_visits_session ON visits(session_id);
+CREATE INDEX IF NOT EXISTS idx_visits_token ON visits(tracking_token);
+CREATE INDEX IF NOT EXISTS idx_visits_device ON visits(device_id);
+CREATE INDEX IF NOT EXISTS idx_visits_recipient ON visits(recipient_id);
 
 CREATE TABLE IF NOT EXISTS campaigns (
     id TEXT PRIMARY KEY,
@@ -88,6 +96,25 @@ CREATE TABLE IF NOT EXISTS analytics_daily (
     value INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (date, key)
 );
+
+CREATE TABLE IF NOT EXISTS recipients (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    campaign_id TEXT NOT NULL,
+    email TEXT NOT NULL,
+    name TEXT,
+    department TEXT,
+    token TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL DEFAULT 'pending',
+    first_click_at TEXT,
+    last_click_at TEXT,
+    click_count INTEGER NOT NULL DEFAULT 0,
+    device_ids TEXT DEFAULT '[]',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_recipients_token ON recipients(token);
+CREATE INDEX IF NOT EXISTS idx_recipients_campaign ON recipients(campaign_id);
+CREATE INDEX IF NOT EXISTS idx_recipients_email ON recipients(email);
 
 CREATE TABLE IF NOT EXISTS api_keys (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -144,10 +171,13 @@ def save_visit_db(record: dict[str, Any], cfg: Config) -> int:
                 classification, detection_score, is_bot, top_signal,
                 vendor_name, vendor_category, headers_json, cookies_json,
                 args_json, signals_json, metrics_json, ja3_hash,
-                http_version, cf_bot_score, cf_country, cf_ray, timestamp
+                http_version, cf_bot_score, cf_country, cf_ray,
+                recipient_id, tracking_token, device_id,
+                is_prefetch, prefetch_reason, timestamp
             ) VALUES (
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?
             )""",
             (
                 record.get("session_id", ""),
@@ -185,6 +215,11 @@ def save_visit_db(record: dict[str, Any], cfg: Config) -> int:
                 record.get("cf_bot_score"),
                 record.get("cf_country"),
                 record.get("cf_ray"),
+                record.get("recipient_id"),
+                record.get("tracking_token"),
+                record.get("device_id"),
+                1 if record.get("is_prefetch") else 0,
+                record.get("prefetch_reason"),
                 record.get("timestamp", datetime.now(timezone.utc).isoformat()),
             ),
         )
@@ -421,6 +456,115 @@ def list_api_keys(cfg: Config) -> list[dict[str, Any]]:
             "FROM api_keys ORDER BY created_at DESC"
         ).fetchall()
         return [dict(row) for row in rows]
+
+
+# --- Recipient / tracking token management --------------------------------
+
+def _generate_token(length: int = 8) -> str:
+    return secrets.token_urlsafe(length)[:length]
+
+
+def import_recipients(
+    cfg: Config,
+    campaign_id: str,
+    recipients: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    results = []
+    with get_db(cfg) as conn:
+        for r in recipients:
+            token = _generate_token()
+            conn.execute(
+                """INSERT INTO recipients (campaign_id, email, name, department, token)
+                VALUES (?, ?, ?, ?, ?)""",
+                (campaign_id, r["email"], r.get("name", ""), r.get("department", ""), token),
+            )
+            results.append({"email": r["email"], "token": token})
+    return results
+
+
+def get_recipient_by_token(cfg: Config, token: str) -> dict[str, Any] | None:
+    with get_db(cfg) as conn:
+        row = conn.execute(
+            "SELECT * FROM recipients WHERE token = ?", (token,)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def list_recipients(
+    cfg: Config,
+    campaign_id: str | None = None,
+) -> list[dict[str, Any]]:
+    if campaign_id:
+        sql = "SELECT * FROM recipients WHERE campaign_id = ? ORDER BY created_at"
+        params: list[Any] = [campaign_id]
+    else:
+        sql = "SELECT * FROM recipients ORDER BY created_at"
+        params = []
+    with get_db(cfg) as conn:
+        rows = conn.execute(sql, params).fetchall()
+        return [dict(row) for row in rows]
+
+
+def record_recipient_click(
+    cfg: Config,
+    token: str,
+    device_id: str | None = None,
+) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    with get_db(cfg) as conn:
+        row = conn.execute(
+            "SELECT id, device_ids, first_click_at FROM recipients WHERE token = ?",
+            (token,),
+        ).fetchone()
+        if not row:
+            return
+
+        device_ids: list[str] = json.loads(row["device_ids"] or "[]")
+        if device_id and device_id not in device_ids:
+            device_ids.append(device_id)
+
+        updates = {
+            "status": "clicked",
+            "last_click_at": now,
+            "click_count": "click_count + 1",
+            "device_ids": json.dumps(device_ids),
+        }
+        if not row["first_click_at"]:
+            updates["first_click_at"] = now
+
+        conn.execute(
+            """UPDATE recipients SET
+                status = 'clicked',
+                first_click_at = COALESCE(first_click_at, ?),
+                last_click_at = ?,
+                click_count = click_count + 1,
+                device_ids = ?
+            WHERE token = ?""",
+            (now, now, json.dumps(device_ids), token),
+        )
+
+
+def get_recipient_stats(cfg: Config, campaign_id: str | None = None) -> dict[str, Any]:
+    condition = "WHERE campaign_id = ?" if campaign_id else ""
+    params = [campaign_id] if campaign_id else []
+    with get_db(cfg) as conn:
+        row = conn.execute(
+            f"""SELECT
+                COUNT(*) as total,
+                SUM(CASE WHEN status = 'clicked' THEN 1 ELSE 0 END) as clicked,
+                SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
+                SUM(click_count) as total_clicks,
+                COUNT(DISTINCT CASE WHEN status = 'clicked' THEN email END) as unique_clickers
+            FROM recipients {condition}""",
+            params,
+        ).fetchone()
+        return dict(row) if row else {}
+
+
+def delete_recipient(cfg: Config, recipient_id: int) -> bool:
+    with get_db(cfg) as conn:
+        cur = conn.execute("DELETE FROM recipients WHERE id = ?", (recipient_id,))
+        return cur.rowcount > 0
 
 
 def revoke_api_key(cfg: Config, key_id: int) -> bool:

@@ -6,6 +6,9 @@ Usage:
     python BluePhishProxy.py report [--out DIR]
     python BluePhishProxy.py campaign create --name NAME --template TEMPLATE [options]
     python BluePhishProxy.py campaign list
+    python BluePhishProxy.py targets import --campaign CAMPAIGN_ID --file targets.csv
+    python BluePhishProxy.py targets list [--campaign CAMPAIGN_ID]
+    python BluePhishProxy.py targets urls --campaign CAMPAIGN_ID --base-url https://phish.example.com
     python BluePhishProxy.py apikey create --name NAME [--role ROLE]
     python BluePhishProxy.py apikey list
     python BluePhishProxy.py apikey revoke KEY_ID
@@ -192,6 +195,76 @@ def cmd_db(args: argparse.Namespace) -> None:
         print(f"Database initialized at {cfg.database_path}")
 
 
+def cmd_targets(args: argparse.Namespace) -> None:
+    import csv
+
+    cfg = Config()
+    from bluephishproxy.database import (
+        init_db, import_recipients, list_recipients, get_recipient_stats,
+    )
+    init_db(cfg)
+
+    if args.targets_action == "import":
+        campaign_id = args.campaign
+        csv_path = Path(args.file)
+        if not csv_path.exists():
+            print(f"ERROR: File not found: {csv_path}")
+            sys.exit(1)
+
+        targets: list[dict[str, str]] = []
+        with open(csv_path, newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                email = row.get("email") or row.get("Email") or row.get("EMAIL")
+                if not email:
+                    continue
+                targets.append({
+                    "email": email.strip(),
+                    "name": (row.get("name") or row.get("Name") or "").strip(),
+                    "department": (row.get("department") or row.get("Department") or "").strip(),
+                })
+
+        if not targets:
+            print("ERROR: No valid targets found in CSV (need 'email' column)")
+            sys.exit(1)
+
+        results = import_recipients(cfg, campaign_id, targets)
+        print(f"Imported {len(results)} targets for campaign {campaign_id}:")
+        for r in results:
+            print(f"  {r['email']:40s}  token={r['token']}")
+
+    elif args.targets_action == "list":
+        campaign_id = args.campaign if hasattr(args, "campaign") and args.campaign else None
+        recipients = list_recipients(cfg, campaign_id)
+        if not recipients:
+            print("No targets found.")
+            return
+
+        stats = get_recipient_stats(cfg, campaign_id)
+        print(f"Targets: {stats.get('total', 0)} total, "
+              f"{stats.get('clicked', 0)} clicked, "
+              f"{stats.get('pending', 0)} pending\n")
+
+        print(f"{'ID':<6} {'Email':<35} {'Name':<20} {'Status':<10} {'Clicks':<8} {'Token'}")
+        print("-" * 100)
+        for r in recipients:
+            print(f"{r['id']:<6} {r['email']:<35} {(r.get('name') or ''):<20} "
+                  f"{r['status']:<10} {r['click_count']:<8} {r['token']}")
+
+    elif args.targets_action == "urls":
+        campaign_id = args.campaign
+        base_url = args.base_url.rstrip("/")
+        recipients = list_recipients(cfg, campaign_id)
+        if not recipients:
+            print("No targets found for this campaign.")
+            return
+
+        print(f"{'Email':<40} {'Tracking URL'}")
+        print("-" * 90)
+        for r in recipients:
+            print(f"{r['email']:<40} {base_url}/t/{r['token']}")
+
+
 def cmd_templates(_args: argparse.Namespace) -> None:
     from bluephishproxy.lures import list_templates
 
@@ -238,6 +311,21 @@ def main() -> None:
     cd = csub.add_parser("delete", help="Delete a campaign")
     cd.add_argument("campaign_id", help="Campaign ID to delete")
 
+    # --- targets ---
+    targets = sub.add_parser("targets", help="Manage recipient targets and tracking tokens")
+    tsub = targets.add_subparsers(dest="targets_action")
+
+    ti = tsub.add_parser("import", help="Import targets from CSV (email,name,department)")
+    ti.add_argument("--campaign", required=True, help="Campaign ID to assign targets to")
+    ti.add_argument("--file", required=True, help="Path to CSV file")
+
+    tl = tsub.add_parser("list", help="List targets and their click status")
+    tl.add_argument("--campaign", type=str, default=None, help="Filter by campaign ID")
+
+    tu = tsub.add_parser("urls", help="Generate per-recipient tracking URLs")
+    tu.add_argument("--campaign", required=True, help="Campaign ID")
+    tu.add_argument("--base-url", required=True, help="Base URL of the proxy (e.g. https://phish.example.com)")
+
     # --- apikey ---
     apikey = sub.add_parser("apikey", help="Manage API keys")
     asub = apikey.add_subparsers(dest="apikey_action")
@@ -269,6 +357,11 @@ def main() -> None:
             campaign.print_help()
         else:
             cmd_campaign(args)
+    elif args.command == "targets":
+        if not args.targets_action:
+            targets.print_help()
+        else:
+            cmd_targets(args)
     elif args.command == "apikey":
         if not args.apikey_action:
             apikey.print_help()

