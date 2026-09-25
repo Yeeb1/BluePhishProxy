@@ -152,6 +152,11 @@ class Config:
         default_factory=lambda: _env_json_dict("BPP_REDIRECT_CHAINS")
     )
 
+    # --- encryption -------------------------------------------------------
+    encryption_key: str = field(
+        default_factory=lambda: os.environ.get("BPP_ENCRYPTION_KEY") or ""
+    )
+
     # --- templates --------------------------------------------------------
     templates_dir: str = field(
         default_factory=lambda: os.environ.get("BPP_TEMPLATES_DIR") or ""

@@ -31,6 +31,7 @@ class Campaign:
     flagged_redirect_url: str = ""
     brand_name: str = "Microsoft"
     description: str = ""
+    target_url: str = ""
     custom_params: dict[str, Any] = field(default_factory=dict)
     redirect_chains: dict[str, Any] = field(default_factory=dict)
 
@@ -50,6 +51,7 @@ def create_campaign(
     flagged_redirect_url: str = "",
     brand_name: str = "",
     description: str = "",
+    target_url: str = "",
     custom_params: dict[str, Any] | None = None,
     redirect_chains: dict[str, Any] | None = None,
 ) -> Campaign:
@@ -62,6 +64,7 @@ def create_campaign(
         flagged_redirect_url=flagged_redirect_url or cfg.flagged_redirect_url,
         brand_name=brand_name or cfg.brand_name,
         description=description,
+        target_url=target_url,
         custom_params=custom_params or {},
         redirect_chains=redirect_chains or {},
     )
@@ -89,6 +92,7 @@ def load_campaign(campaign_id: str | None, cfg: Config) -> Campaign | None:
         flagged_redirect_url=data.get("flagged_redirect_url", ""),
         brand_name=data.get("brand_name", "Microsoft"),
         description=data.get("description", ""),
+        target_url=data.get("target_url", ""),
         custom_params=data.get("custom_params", {}),
         redirect_chains=data.get("redirect_chains", {}),
     )
@@ -108,6 +112,7 @@ def list_campaigns(cfg: Config) -> list[Campaign]:
             flagged_redirect_url=data.get("flagged_redirect_url", ""),
             brand_name=data.get("brand_name", "Microsoft"),
             description=data.get("description", ""),
+            target_url=data.get("target_url", ""),
             custom_params=data.get("custom_params", {}),
             redirect_chains=data.get("redirect_chains", {}),
         ))

