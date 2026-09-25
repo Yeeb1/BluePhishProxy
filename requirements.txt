@@ -1,3 +1,4 @@
-Flask
-requests
-werkzeug
+Flask>=3.0,<4.0
+requests>=2.31,<3.0
+werkzeug>=3.0,<4.0
+gunicorn>=21.2,<23.0
