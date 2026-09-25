@@ -572,6 +572,9 @@ class TestProxyRoutes:
 
 # --- Credential API tests ------------------------------------------------
 
+_AUTH = {"Authorization": "Bearer test-operator-token"}
+
+
 class TestCredentialAPI:
     def test_list_credentials(self, client, cfg):
         save_credential(cfg, {
@@ -579,7 +582,7 @@ class TestCredentialAPI:
             "username_enc": "u",
             "password_enc": "p",
         })
-        resp = client.get("/api/operator/credentials?campaign_id=c1")
+        resp = client.get("/api/operator/credentials?campaign_id=c1", headers=_AUTH)
         assert resp.status_code == 200
         data = resp.get_json()
         assert len(data) == 1
@@ -590,7 +593,7 @@ class TestCredentialAPI:
             "username_enc": "u",
             "password_enc": "p",
         })
-        resp = client.get(f"/api/operator/credentials/{cid}")
+        resp = client.get(f"/api/operator/credentials/{cid}", headers=_AUTH)
         assert resp.status_code == 200
 
     def test_credential_stats(self, client, cfg):
@@ -600,14 +603,18 @@ class TestCredentialAPI:
             "password_enc": "p",
             "ip_address": "10.0.0.1",
         })
-        resp = client.get("/api/operator/credentials/stats?campaign_id=c1")
+        resp = client.get("/api/operator/credentials/stats?campaign_id=c1", headers=_AUTH)
         assert resp.status_code == 200
         data = resp.get_json()
         assert data["total"] == 1
 
     def test_credential_not_found(self, client):
-        resp = client.get("/api/operator/credentials/99999")
+        resp = client.get("/api/operator/credentials/99999", headers=_AUTH)
         assert resp.status_code == 404
+
+    def test_unauthenticated_rejected(self, client):
+        resp = client.get("/api/operator/credentials")
+        assert resp.status_code == 401
 
 
 class TestSessionAPI:
@@ -616,7 +623,7 @@ class TestSessionAPI:
             "campaign_id": "c1",
             "session_data_enc": "data",
         })
-        resp = client.get("/api/operator/sessions?campaign_id=c1")
+        resp = client.get("/api/operator/sessions?campaign_id=c1", headers=_AUTH)
         assert resp.status_code == 200
         data = resp.get_json()
         assert len(data) == 1
@@ -626,7 +633,7 @@ class TestSessionAPI:
             "campaign_id": "c1",
             "session_data_enc": "data",
         })
-        resp = client.get(f"/api/operator/sessions/{sid}")
+        resp = client.get(f"/api/operator/sessions/{sid}", headers=_AUTH)
         assert resp.status_code == 200
 
     def test_invalidate_session(self, client, cfg):
@@ -634,10 +641,10 @@ class TestSessionAPI:
             "campaign_id": "c1",
             "session_data_enc": "data",
         })
-        resp = client.post(f"/api/operator/sessions/{sid}/invalidate")
+        resp = client.post(f"/api/operator/sessions/{sid}/invalidate", headers=_AUTH)
         assert resp.status_code == 200
         assert resp.get_json()["status"] == "invalidated"
 
     def test_session_not_found(self, client):
-        resp = client.get("/api/operator/sessions/99999")
+        resp = client.get("/api/operator/sessions/99999", headers=_AUTH)
         assert resp.status_code == 404

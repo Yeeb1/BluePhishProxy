@@ -23,6 +23,7 @@ def tmp_db(tmp_path):
 def cfg(tmp_db):
     c = Config()
     c.database_path = tmp_db
+    c.operator_token = "test-operator-token"
     init_db(c)
     return c
 

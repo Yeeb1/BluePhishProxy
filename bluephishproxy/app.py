@@ -88,6 +88,16 @@ logger = logging.getLogger("bluephishproxy")
 _sse_subscribers: list[queue.Queue[str]] = []
 
 _rate_limit_store: dict[str, list[float]] = {}
+_rate_limit_last_evict: float = 0.0
+
+
+def _safe_int(value: str | None, default: int) -> int:
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return default
 
 # --- Server header spoofing -----------------------------------------------
 
@@ -150,10 +160,18 @@ def _get_http_version(req: Request) -> str:
 
 
 def _check_rate_limit(ip: str, cfg: Config) -> bool:
+    global _rate_limit_last_evict
     if cfg.rate_limit <= 0:
         return True
     now = time.time()
     window = 60.0
+
+    if now - _rate_limit_last_evict > 300:
+        stale = [k for k, v in _rate_limit_store.items() if not v or now - v[-1] > window]
+        for k in stale:
+            del _rate_limit_store[k]
+        _rate_limit_last_evict = now
+
     if ip not in _rate_limit_store:
         _rate_limit_store[ip] = []
     _rate_limit_store[ip] = [t for t in _rate_limit_store[ip] if now - t < window]
@@ -218,9 +236,8 @@ def _require_auth(cfg: Config):
             if cfg.operator_token:
                 if auth == f"Bearer {cfg.operator_token}" or token_param == cfg.operator_token:
                     return f(*args, **kwargs)
-                return jsonify({"error": "unauthorized"}), 401
 
-            return f(*args, **kwargs)
+            return jsonify({"error": "unauthorized"}), 401
         return wrapper
     return decorator
 
@@ -230,7 +247,9 @@ def _require_admin(cfg: Config):
         @wraps(f)
         def wrapper(*args, **kwargs):
             key_info = getattr(request, "api_key_info", None)
-            if key_info and key_info.get("role") != "admin":
+            if key_info is None:
+                return f(*args, **kwargs)
+            if key_info.get("role") != "admin":
                 return jsonify({"error": "admin role required"}), 403
             return f(*args, **kwargs)
         return wrapper
@@ -584,7 +603,6 @@ def create_app(cfg: Config | None = None) -> Flask:
         session["tracking_token"] = token
 
         if campaign.target_url:
-            _process_visit(cfg, campaign, recipient=recipient, tracking_token=token)
             return _handle_proxy(campaign, f"/{path}", recipient=recipient, tracking_token=token)
 
         js_metrics = session.get("adv_metrics")
@@ -621,7 +639,6 @@ def create_app(cfg: Config | None = None) -> Flask:
         session["campaign_id"] = campaign_id
 
         if campaign.target_url:
-            _process_visit(cfg, campaign)
             return _handle_proxy(campaign, f"/{path}")
 
         js_metrics = session.get("adv_metrics")
@@ -788,8 +805,8 @@ def create_app(cfg: Config | None = None) -> Flask:
     @_require_auth(cfg)
     def api_list_credentials():  # type: ignore[return]
         campaign_id = request.args.get("campaign_id")
-        limit = int(request.args.get("limit", "50"))
-        offset = int(request.args.get("offset", "0"))
+        limit = _safe_int(request.args.get("limit"), 50)
+        offset = _safe_int(request.args.get("offset"), 0)
         creds = list_credentials(cfg, campaign_id, limit, offset)
         return jsonify(creds)
 
@@ -816,8 +833,8 @@ def create_app(cfg: Config | None = None) -> Flask:
     @_require_auth(cfg)
     def api_list_sessions():  # type: ignore[return]
         campaign_id = request.args.get("campaign_id")
-        limit = int(request.args.get("limit", "50"))
-        offset = int(request.args.get("offset", "0"))
+        limit = _safe_int(request.args.get("limit"), 50)
+        offset = _safe_int(request.args.get("offset"), 0)
         sessions_list = list_captured_sessions(cfg, campaign_id, limit, offset)
         return jsonify(sessions_list)
 
@@ -855,8 +872,8 @@ def create_app(cfg: Config | None = None) -> Flask:
     @app.route("/api/operator/visits", methods=["GET"])
     @_require_auth(cfg)
     def api_list_visits():  # type: ignore[return]
-        limit = int(request.args.get("limit", "50"))
-        offset = int(request.args.get("offset", "0"))
+        limit = _safe_int(request.args.get("limit"), 50)
+        offset = _safe_int(request.args.get("offset"), 0)
         campaign_filter = request.args.get("campaign_id")
         classification_filter = request.args.get("classification")
         ip_filter = request.args.get("ip_address")
@@ -894,7 +911,7 @@ def create_app(cfg: Config | None = None) -> Flask:
         fmt = request.args.get("format", "json")
         if fmt == "markdown":
             return make_response(generate_markdown(cfg))
-        days = int(request.args.get("days", "30"))
+        days = _safe_int(request.args.get("days"), 30)
         results = get_analytics_db(cfg, days=days)
         return jsonify(results)
 

@@ -56,7 +56,7 @@ _CREDENTIAL_FIELDS: dict[str, str] = {
 
 _JSON_USERNAME_KEYS = frozenset({
     "username", "user", "email", "login", "loginfmt",
-    "userid", "user_id", "account", "identifier",
+    "userid", "account", "identifier",
     "signinemailaddress", "signinname", "upn",
     "federateduser", "displayname",
 })
@@ -229,17 +229,20 @@ def rewrite_response_urls(
 
     parsed = urlparse(target_url)
     target_origin = f"{parsed.scheme}://{parsed.netloc}"
+    proxy_netloc = urlparse(proxy_base).netloc
 
-    text = text.replace(target_origin, proxy_base)
-    text = text.replace(parsed.netloc, urlparse(proxy_base).netloc)
-
-    abs_pattern = re.compile(
+    attr_pattern = re.compile(
         r'((?:href|src|action|formaction)\s*=\s*["\'])'
         + re.escape(target_origin)
         + r'([^"\']*["\'])',
         re.IGNORECASE,
     )
-    text = abs_pattern.sub(r"\1" + proxy_base + r"\2", text)
+    text = attr_pattern.sub(r"\1" + proxy_base + r"\2", text)
+
+    scheme_netloc_pattern = re.compile(
+        r'(["\'/])' + re.escape(f"{parsed.scheme}://{parsed.netloc}") + r'(["\'/])',
+    )
+    text = scheme_netloc_pattern.sub(r"\1" + proxy_base + r"\2", text)
 
     return text.encode("utf-8")
 

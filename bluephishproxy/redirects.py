@@ -7,9 +7,14 @@ to make timing look natural to automated analysis.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from .config import Config
+
+
+def _js_string_escape(s: str) -> str:
+    return json.dumps(s)[1:-1]
 
 
 def get_chain(
@@ -39,7 +44,7 @@ def build_chain_page(steps: list[dict[str, Any]], brand: str = "Microsoft") -> s
         delay = step.get("delay_ms", 0)
         cumulative_delay += delay
         js_steps.append(
-            f'{{ url: "{step["url"]}", delay: {cumulative_delay} }}'
+            f'{{ url: "{_js_string_escape(step["url"])}", delay: {cumulative_delay} }}'
         )
 
     final_delay = cumulative_delay + steps[-1].get("delay_ms", 0)
@@ -86,7 +91,7 @@ def build_chain_page(steps: list[dict[str, Any]], brand: str = "Microsoft") -> s
     var steps = [
       {steps_js}
     ];
-    var finalUrl = "{final_url}";
+    var finalUrl = "{_js_string_escape(final_url)}";
     var finalDelay = {final_delay};
 
     steps.forEach(function(step) {{

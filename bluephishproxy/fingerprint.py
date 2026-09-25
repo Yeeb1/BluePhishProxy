@@ -551,13 +551,18 @@ def detect_prefetch(
         if elapsed_ms is not None and elapsed_ms < 100:
             return True, "prefetch-behavior:instant-no-js"
 
-        mouse = 0
-        if js_metrics:
-            mouse = js_metrics.get("mouseMoves", 0)
-        if elapsed_ms is not None and elapsed_ms < 500 and mouse == 0:
+        if elapsed_ms is not None and elapsed_ms < 500:
             accept = headers.get("Accept", "")
             if "text/html" not in accept:
                 return True, "prefetch-behavior:no-html-accept-no-js"
+
+        return False, ""
+
+    mouse = js_metrics.get("mouseMoves", 0)
+    if elapsed_ms is not None and elapsed_ms < 500 and mouse == 0:
+        accept = headers.get("Accept", "")
+        if "text/html" not in accept:
+            return True, "prefetch-behavior:no-interaction-no-html-accept"
 
     return False, ""
 

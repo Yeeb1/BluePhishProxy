@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+_AUTH = {"Authorization": "Bearer test-operator-token"}
+
 from bluephishproxy.database import (
     get_recipient_by_token,
     import_recipients,
@@ -109,6 +111,7 @@ class TestRecipientAPI:
                     {"email": "api2@example.com"},
                 ],
             },
+            headers=_AUTH,
         )
         assert resp.status_code == 201
         data = resp.get_json()
@@ -120,6 +123,7 @@ class TestRecipientAPI:
         resp = client.post(
             "/api/operator/recipients",
             json={"targets": [{"email": "x@x.com"}]},
+            headers=_AUTH,
         )
         assert resp.status_code == 400
 
@@ -127,6 +131,7 @@ class TestRecipientAPI:
         resp = client.post(
             "/api/operator/recipients",
             json={"campaign_id": campaign["id"]},
+            headers=_AUTH,
         )
         assert resp.status_code == 400
 
@@ -137,6 +142,7 @@ class TestRecipientAPI:
                 "campaign_id": campaign["id"],
                 "targets": [{"name": "No Email"}],
             },
+            headers=_AUTH,
         )
         assert resp.status_code == 400
 
@@ -145,7 +151,7 @@ class TestRecipientAPI:
             {"email": "list1@example.com"},
             {"email": "list2@example.com"},
         ])
-        resp = client.get(f"/api/operator/recipients?campaign_id={campaign['id']}")
+        resp = client.get(f"/api/operator/recipients?campaign_id={campaign['id']}", headers=_AUTH)
         assert resp.status_code == 200
         data = resp.get_json()
         assert len(data) == 2
@@ -158,7 +164,7 @@ class TestRecipientAPI:
         from bluephishproxy.database import record_recipient_click
         record_recipient_click(cfg, results[0]["token"])
 
-        resp = client.get(f"/api/operator/recipients/stats?campaign_id={campaign['id']}")
+        resp = client.get(f"/api/operator/recipients/stats?campaign_id={campaign['id']}", headers=_AUTH)
         assert resp.status_code == 200
         data = resp.get_json()
         assert data["total"] == 2
@@ -171,7 +177,7 @@ class TestRecipientAPI:
         recipients = list_recipients(cfg, campaign["id"])
         rid = recipients[0]["id"]
 
-        resp = client.delete(f"/api/operator/recipients/{rid}")
+        resp = client.delete(f"/api/operator/recipients/{rid}", headers=_AUTH)
         assert resp.status_code == 200
         assert len(list_recipients(cfg, campaign["id"])) == 0
 
