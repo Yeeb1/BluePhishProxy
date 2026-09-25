@@ -6,10 +6,12 @@ redeployed across engagements without code changes.
 
 from __future__ import annotations
 
+import json
 import os
 import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -29,6 +31,19 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_json_list(name: str) -> list[Any]:
+    raw = os.environ.get(name)
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            return parsed
+        return [parsed]
+    except json.JSONDecodeError:
+        return [raw]
+
+
 @dataclass(slots=True)
 class Config:
     """Immutable-ish runtime configuration."""
@@ -37,30 +52,26 @@ class Config:
     host: str = field(default_factory=lambda: os.environ.get("BPP_HOST", "0.0.0.0"))
     port: int = field(default_factory=lambda: _env_int("BPP_PORT", 5000))
     debug: bool = field(default_factory=lambda: _env_bool("BPP_DEBUG", False))
-
-    # Number of trusted reverse proxies in front of the app (for X-Forwarded-*).
     trusted_proxies: int = field(default_factory=lambda: _env_int("BPP_TRUSTED_PROXIES", 1))
 
-    # --- campaign ---------------------------------------------------------
-    # Where a *clean* human session is sent once profiling is complete.
+    # --- campaign defaults ------------------------------------------------
     safe_redirect_url: str = field(
         default_factory=lambda: os.environ.get(
             "BPP_SAFE_REDIRECT_URL", "https://www.microsoft.com/en-us/security"
         )
     )
-    # Where a *flagged* (scanner/bot) session is sent. Kept separate so that
-    # defensive infrastructure never reaches the same place as real targets.
     flagged_redirect_url: str = field(
         default_factory=lambda: os.environ.get(
             "BPP_FLAGGED_REDIRECT_URL", "https://www.microsoft.com/en-us/security"
         )
     )
     brand_name: str = field(default_factory=lambda: os.environ.get("BPP_BRAND", "Microsoft"))
+    default_template: str = field(
+        default_factory=lambda: os.environ.get("BPP_DEFAULT_TEMPLATE", "safelinks")
+    )
 
     # --- detection tuning -------------------------------------------------
-    # A visit scoring >= bot_threshold is treated as automated/defensive infra.
     bot_threshold: int = field(default_factory=lambda: _env_int("BPP_BOT_THRESHOLD", 50))
-    # A visit scoring >= suspicious_threshold (but below bot) is "suspicious".
     suspicious_threshold: int = field(
         default_factory=lambda: _env_int("BPP_SUSPICIOUS_THRESHOLD", 25)
     )
@@ -86,12 +97,21 @@ class Config:
     )
 
     # --- session ----------------------------------------------------------
-    # A stable secret keeps signed session cookies valid across restarts and
-    # multiple workers. If unset we generate an ephemeral one and warn.
     secret_key: str = field(
         default_factory=lambda: os.environ.get("BPP_SECRET_KEY") or ""
     )
     session_max_age: int = field(default_factory=lambda: _env_int("BPP_SESSION_MAX_AGE", 3600))
+
+    # --- webhooks ---------------------------------------------------------
+    webhook_urls: list[Any] = field(default_factory=lambda: _env_json_list("BPP_WEBHOOK_URLS"))
+    webhook_min_level: str = field(
+        default_factory=lambda: os.environ.get("BPP_WEBHOOK_MIN_LEVEL", "suspicious")
+    )
+
+    # --- operator API -----------------------------------------------------
+    operator_token: str = field(
+        default_factory=lambda: os.environ.get("BPP_OPERATOR_TOKEN") or ""
+    )
 
     def __post_init__(self) -> None:
         self.data_dir = Path(self.data_dir)
